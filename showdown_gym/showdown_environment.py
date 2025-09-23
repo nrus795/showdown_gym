@@ -65,9 +65,13 @@ class ShowdownEnvironment(BaseShowdownEnv):
             health_opponent.extend([1.0] * (len(health_team) - len(health_opponent)))
 
         prior_health_opponent = []
+        prior_health_team = []
         if prior_battle is not None:
             prior_health_opponent = [
                 mon.current_hp_fraction for mon in prior_battle.opponent_team.values()
+            ]
+            prior_health_team = [
+                mon.current_hp_fraction for mon in prior_battle.team.values()
             ]
 
         # Ensure health_opponent has 6 components, filling missing values with 1.0 (fraction of health)
@@ -76,12 +80,20 @@ class ShowdownEnvironment(BaseShowdownEnv):
                 [1.0] * (len(health_team) - len(prior_health_opponent))
             )
 
+        if len(prior_health_team) < len(health_team):
+            prior_health_team.extend(
+                [1.0] * (len(health_team) - len(prior_health_team))
+            )
+
         diff_health_opponent = np.array(prior_health_opponent) - np.array(
             health_opponent
         )
+        diff_health_team = np.array(prior_health_team) - np.array(health_team)
 
         # Reward for reducing the opponent's health
         reward += np.sum(diff_health_opponent)
+        # Penalty for losing your own health
+        reward -= np.sum(diff_health_team)
 
         return reward
 
@@ -134,7 +146,7 @@ class ShowdownEnvironment(BaseShowdownEnv):
                 health_team,  # N components for the health of each pokemon
                 health_opponent,  # N components for the health of opponent pokemon
             ]
-        )
+        ).astype(np.float32, copy=False)
 
         return final_vector
 
