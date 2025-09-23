@@ -11,7 +11,6 @@ from showdown_gym.base_environment import BaseShowdownEnv
 
 
 class ShowdownEnvironment(BaseShowdownEnv):
-
     def __init__(
         self,
         battle_format: str = "gen9randombattle",
