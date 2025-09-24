@@ -34,6 +34,8 @@ class ShowdownEnvironment(BaseShowdownEnv):
         if self.battle1 is not None:
             agent = self.possible_agents[0]
             info[agent]["win"] = self.battle1.won
+            # Add rating if available, need to check whether this is possible
+            # info[agent]["rating"] = self.battle1.rating
 
         return info
 
