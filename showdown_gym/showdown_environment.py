@@ -196,6 +196,60 @@ class ShowdownEnvironment(BaseShowdownEnv):
         reward += np.sum(diff_faint_opponent)
         reward -= np.sum(diff_faint_team)
 
+        my_sc_now = getattr(battle, "side_conditions", {}) or {}
+        opp_sc_now = getattr(battle, "opponent_side_conditions", {}) or {}
+        my_sc_prv = getattr(prior_battle, "side_conditions", {}) or {}
+        opp_sc_prv = getattr(prior_battle, "opponent_side_conditions", {}) or {}
+
+        def _haz_vec(sc: dict) -> np.ndarray:
+            # rocks/web are booleans, spikes/tspikes are layer counts
+            rocks = 1.0 if "stealthrock" in sc else 0.0
+            spikes = float(sc.get("spikes", 0))
+            tsp = float(sc.get("toxicspikes", 0))
+            web = 1.0 if "stickyweb" in sc else 0.0
+            return np.array([rocks, spikes, tsp, web], dtype=np.float32)
+
+        diff_haz_opp = _haz_vec(opp_sc_prv) - _haz_vec(opp_sc_now)
+        diff_haz_me = _haz_vec(my_sc_prv) - _haz_vec(my_sc_now)
+
+        reward -= np.sum(diff_haz_opp)
+        reward += np.sum(diff_haz_me)
+
+        status_team = [
+            int(getattr(mon, "status", None) in _STATUS) for mon in battle.team.values()
+        ]
+        status_opp = [
+            int(getattr(mon, "status", None) in _STATUS)
+            for mon in battle.opponent_team.values()
+        ]
+
+        # Pad opponent to match team length (same as you did above)
+        if len(status_opp) < len(status_team):
+            status_opp.extend([0] * (len(status_team) - len(status_opp)))
+
+        prior_status_team = []
+        prior_status_opp = []
+        if prior_battle is not None:
+            prior_status_team = [
+                int(getattr(mon, "status", None) in _STATUS)
+                for mon in prior_battle.team.values()
+            ]
+            prior_status_opp = [
+                int(getattr(mon, "status", None) in _STATUS)
+                for mon in prior_battle.opponent_team.values()
+            ]
+
+        if len(prior_status_opp) < len(status_team):
+            prior_status_opp.extend([0] * (len(status_team) - len(prior_status_opp)))
+        if len(prior_status_team) < len(status_team):
+            prior_status_team.extend([0] * (len(status_team) - len(prior_status_team)))
+
+        diff_status_opp = np.array(prior_status_opp) - np.array(status_opp)
+        diff_status_me = np.array(prior_status_team) - np.array(status_team)
+
+        reward -= np.sum(diff_status_opp)
+        reward += np.sum(diff_status_me)
+
         return reward
 
     def _observation_size(self) -> int:
