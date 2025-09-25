@@ -9,6 +9,8 @@ from poke_env.player.player import Player
 
 from showdown_gym.base_environment import BaseShowdownEnv
 
+STATUSES = {"BRN", "PAR", "PSN", "SLP", "FRZ"}
+
 
 class ShowdownEnvironment(BaseShowdownEnv):
     def __init__(
@@ -110,7 +112,7 @@ class ShowdownEnvironment(BaseShowdownEnv):
 
         # Simply change this number to the number of features you want to include in the observation from embed_battle.
         # If you find a way to automate this, please let me know!
-        return 12
+        return 36
 
     def embed_battle(self, battle: AbstractBattle) -> np.ndarray:
         """
@@ -127,26 +129,99 @@ class ShowdownEnvironment(BaseShowdownEnv):
             np.float32: A 1D numpy array containing the state you want the agent to observe.
         """
 
+        # --- your original health blocks ---
         health_team = [mon.current_hp_fraction for mon in battle.team.values()]
         health_opponent = [
             mon.current_hp_fraction for mon in battle.opponent_team.values()
         ]
 
-        # Ensure health_opponent has 6 components, filling missing values with 1.0 (fraction of health)
         if len(health_opponent) < len(health_team):
             health_opponent.extend([1.0] * (len(health_team) - len(health_opponent)))
 
-        #########################################################################################################
-        # Caluclate the length of the final_vector and make sure to update the value in _observation_size above #
-        #########################################################################################################
+        # --- hazards on each side (rocks, spikes/3, tspikes/2, web) ---
+        side_conditions_team = getattr(battle, "side_conditions", {}) or {}
+        side_conditions_opponent = getattr(battle, "opponent_side_conditions", {}) or {}
 
-        # Final vector - single array with health of both teams
+        def _hazards(sc: dict) -> list[float]:
+            rocks = 1.0 if "stealthrock" in sc else 0.0
+            spikes = min(sc.get("spikes", 0), 3) / 3.0
+            tspikes = min(sc.get("toxicspikes", 0), 2) / 2.0
+            web = 1.0 if "stickyweb" in sc else 0.0
+            return [rocks, spikes, tspikes, web]
+
+        hazards_team = _hazards(side_conditions_team)  # 4
+        hazards_opponent = _hazards(side_conditions_opponent)  # 4
+
+        # --- screens on each side (reflect, lightscreen, auroraveil) ---
+        def _screens(sc: dict) -> list[float]:
+            keys = ["reflect", "lightscreen", "auroraveil"]
+            return [1.0 if k in sc else 0.0 for k in keys]
+
+        screens_team = _screens(side_conditions_team)  # 3
+        screens_opponent = _screens(side_conditions_opponent)  # 3
+
+        # --- weather one-hot (none, rain, sun, sand, snow) ---
+        weather_names = ["none", "raindance", "sunnyday", "sandstorm", "snow"]
+        weather = [0.0] * 5
+        cur_weather = getattr(battle, "weather", None)
+        idx = 0
+        if (
+            cur_weather is not None
+            and getattr(cur_weather, "name", None) in weather_names
+        ):
+            idx = weather_names.index(cur_weather.name)
+        weather[idx] = 1.0  # 5
+
+        # --- simple counts (alive + status) for each side, normalised by 6 ---
+
+        team_alive = sum(1 for m in battle.team.values() if not m.fainted) / 6.0
+        opponent_alive = (
+            sum(1 for m in battle.opponent_team.values() if not m.fainted) / 6.0
+        )
+        team_status = (
+            sum(
+                1
+                for m in battle.team.values()
+                if getattr(m, "status", None) in STATUSES
+            )
+            / 6.0
+        )
+        opponent_status = (
+            sum(
+                1
+                for m in battle.opponent_team.values()
+                if getattr(m, "status", None) in STATUSES
+            )
+            / 6.0
+        )
+
+        counts_team = [team_alive, team_status]  # 2
+        counts_opponent = [opponent_alive, opponent_status]  # 2
+
+        # --- opponent revealed moves fraction (0..1) ---
+        opponent_active = getattr(battle, "opponent_active_pokemon", None)
+        opponent_revealed_moves = 0.0
+        if (
+            opponent_active is not None
+            and getattr(opponent_active, "moves", None) is not None
+        ):
+            opponent_revealed_moves = min(4, len(opponent_active.moves)) / 4.0  # 1
+
+        # --- final vector (keep your variable name) ---
         final_vector = np.concatenate(
             [
-                health_team,  # N components for the health of each pokemon
-                health_opponent,  # N components for the health of opponent pokemon
+                health_team,  # ~6
+                health_opponent,  # ~6 (padded)
+                hazards_team,  # 4
+                hazards_opponent,  # 4
+                screens_team,  # 3
+                screens_opponent,  # 3
+                weather,  # 5
+                counts_team,  # 2
+                counts_opponent,  # 2
+                [opponent_revealed_moves],  # 1
             ]
-        ).astype(np.float32, copy=False)
+        ).astype(np.float32)
 
         return final_vector
 
