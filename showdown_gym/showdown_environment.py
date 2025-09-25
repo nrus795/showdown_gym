@@ -54,34 +54,39 @@ class ShowdownEnvironment(BaseShowdownEnv):
         """
 
         prior_battle = self._get_prior_battle(battle)
+        if prior_battle is None:
+            return 0.0
+
+        # Weights (tweak if needed)
+        KO_W = 1.0
+        HAZ_W = 0.2
+        STAT_W = 0.1
+        STEP_PENALTY = 0.01
+        WIN_BONUS = 10.0
+        LOSS_PENALTY = 10.0
 
         reward = 0.0
 
+        # -----------------------------
+        # HP: deal dmg (good), take dmg (bad)
+        # -----------------------------
         health_team = [mon.current_hp_fraction for mon in battle.team.values()]
         health_opponent = [
             mon.current_hp_fraction for mon in battle.opponent_team.values()
         ]
-
-        # If the opponent has less than 6 Pokémon, fill the missing values with 1.0 (fraction of health)
         if len(health_opponent) < len(health_team):
             health_opponent.extend([1.0] * (len(health_team) - len(health_opponent)))
 
-        prior_health_opponent = []
-        prior_health_team = []
-        if prior_battle is not None:
-            prior_health_opponent = [
-                mon.current_hp_fraction for mon in prior_battle.opponent_team.values()
-            ]
-            prior_health_team = [
-                mon.current_hp_fraction for mon in prior_battle.team.values()
-            ]
-
-        # Ensure health_opponent has 6 components, filling missing values with 1.0 (fraction of health)
+        prior_health_team = [
+            mon.current_hp_fraction for mon in prior_battle.team.values()
+        ]
+        prior_health_opponent = [
+            mon.current_hp_fraction for mon in prior_battle.opponent_team.values()
+        ]
         if len(prior_health_opponent) < len(health_team):
             prior_health_opponent.extend(
                 [1.0] * (len(health_team) - len(prior_health_opponent))
             )
-
         if len(prior_health_team) < len(health_team):
             prior_health_team.extend(
                 [1.0] * (len(health_team) - len(prior_health_team))
@@ -92,10 +97,99 @@ class ShowdownEnvironment(BaseShowdownEnv):
         )
         diff_health_team = np.array(prior_health_team) - np.array(health_team)
 
-        # Reward for reducing the opponent's health
-        reward += np.sum(diff_health_opponent)
-        # Penalty for losing your own health
-        reward -= np.sum(diff_health_team)
+        reward += float(np.sum(diff_health_opponent))  # we dealt damage → +
+        reward -= float(np.sum(diff_health_team))  # we took damage  → -
+
+        # -----------------------------
+        # KOs since last step
+        # -----------------------------
+        # Keep your extend/padding style (single-element lists for clarity)
+        faint_team = [sum(int(m.fainted) for m in battle.team.values())]
+        faint_opponent = [sum(int(m.fainted) for m in battle.opponent_team.values())]
+        prior_faint_team = [sum(int(m.fainted) for m in prior_battle.team.values())]
+        prior_faint_opponent = [
+            sum(int(m.fainted) for m in prior_battle.opponent_team.values())
+        ]
+
+        if len(prior_faint_opponent) < len(faint_team):
+            prior_faint_opponent.extend(
+                [0] * (len(faint_team) - len(prior_faint_opponent))
+            )
+        if len(prior_faint_team) < len(faint_team):
+            prior_faint_team.extend([0] * (len(faint_team) - len(prior_faint_team)))
+
+        # deltas (now - prior) so that "good" is positive
+        opp_ko_delta = np.array(faint_opponent, dtype=np.int8) - np.array(
+            prior_faint_opponent, dtype=np.int8
+        )
+        me_ko_delta = np.array(faint_team, dtype=np.int8) - np.array(
+            prior_faint_team, dtype=np.int8
+        )
+
+        reward += KO_W * float(np.sum(opp_ko_delta))  # new KO on them → +
+        reward -= KO_W * float(np.sum(me_ko_delta))  # new KO on us   → -
+
+        # -----------------------------
+        # Hazards (rocks, spikes, tspikes, web)
+        # -----------------------------
+        side_conditions_team = getattr(battle, "side_conditions", {}) or {}
+        side_conditions_opponent = getattr(battle, "opponent_side_conditions", {}) or {}
+        prior_side_conditions_team = getattr(prior_battle, "side_conditions", {}) or {}
+        prior_side_conditions_opponent = (
+            getattr(prior_battle, "opponent_side_conditions", {}) or {}
+        )
+
+        def _haz_vec(sc: dict) -> np.ndarray:
+            rocks = 1.0 if "stealthrock" in sc else 0.0
+            spikes = float(sc.get("spikes", 0))
+            tspikes = float(sc.get("toxicspikes", 0))
+            web = 1.0 if "stickyweb" in sc else 0.0
+            return np.array([rocks, spikes, tspikes, web], dtype=np.float32)
+
+        # now - prior so that "adding on opponent" is positive, "adding on us" is negative
+        haz_opponent_delta = _haz_vec(side_conditions_opponent) - _haz_vec(
+            prior_side_conditions_opponent
+        )
+        haz_team_delta = _haz_vec(side_conditions_team) - _haz_vec(
+            prior_side_conditions_team
+        )
+
+        reward += HAZ_W * float(np.sum(haz_opponent_delta))  # hazards added on them → +
+        reward -= HAZ_W * float(np.sum(haz_team_delta))  # hazards added on us   → -
+
+        # -----------------------------
+        # Statuses (BRN/PAR/PSN/SLP/FRZ)
+        # -----------------------------
+        def _status_count(team_dict) -> int:
+            return sum(
+                1 for m in team_dict.values() if getattr(m, "status", None) in STATUSES
+            )
+
+        status_team = [_status_count(battle.team)]
+        status_opponent = [_status_count(battle.opponent_team)]
+        prior_status_team = [_status_count(prior_battle.team)]
+        prior_status_opponent = [_status_count(prior_battle.opponent_team)]
+
+        status_opponent_delta = np.array(status_opponent, dtype=np.int8) - np.array(
+            prior_status_opponent, dtype=np.int8
+        )
+        status_team_delta = np.array(status_team, dtype=np.int8) - np.array(
+            prior_status_team, dtype=np.int8
+        )
+
+        reward += STAT_W * float(
+            np.sum(status_opponent_delta)
+        )  # new status on them → +
+        reward -= STAT_W * float(np.sum(status_team_delta))  # new status on us   → -
+
+        # -----------------------------
+        # Step cost + terminal
+        # -----------------------------
+        reward -= STEP_PENALTY
+        if battle.won:
+            reward += WIN_BONUS
+        elif battle.lost:
+            reward -= LOSS_PENALTY
 
         return reward
 
