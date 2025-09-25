@@ -10,10 +10,6 @@ from poke_env.player.player import Player
 from showdown_gym.base_environment import BaseShowdownEnv
 
 
-# --- helpers inside ShowdownEnvironment ---
-_STATUS = ["BRN", "PAR", "PSN", "SLP", "FRZ"]
-
-
 class ShowdownEnvironment(BaseShowdownEnv):
     def __init__(
         self,
@@ -28,74 +24,6 @@ class ShowdownEnvironment(BaseShowdownEnv):
             account_name_two=account_name_two,
             team=team,
         )
-
-    def _one_hot_status(self, mon) -> list[float]:
-        st = [0.0] * 5
-        if getattr(mon, "status", None) in _STATUS:
-            st[_STATUS.index(mon.status)] = 1.0
-        return st
-
-    def _boost_sum_norm(self, mon) -> float:
-        # boosts is dict { "atk":int, "def":int, "spa":int, "spd":int, "spe":int, ... } in [-6,6]
-        if getattr(mon, "boosts", None):
-            s = sum(
-                mon.boosts.get(k, 0)
-                for k in ["atk", "def", "spa", "spd", "spe", "accuracy", "evasion"]
-            )
-            return max(-1.0, min(1.0, s / 18.0))  # crude, stable
-        return 0.0
-
-    def _field_weather_one_hot(self, battle) -> list[float]:
-        # names depend on poke-env; fall back to 'none'
-        names = ["none", "raindance", "sunnyday", "sandstorm", "snow"]
-        cur = getattr(battle, "weather", None)
-        out = [0.0] * 5
-        idx = 0
-        if cur is not None and getattr(cur, "name", None) in names:
-            idx = names.index(cur.name)
-        out[idx] = 1.0
-        return out
-
-    def _screens_flags(self, side_conditions: dict) -> list[float]:
-        # keys like "reflect", "lightscreen", "auroraveil" (poke-env SideCondition names)
-        keys = ["reflect", "lightscreen", "auroraveil"]
-        return [1.0 if k in side_conditions else 0.0 for k in keys]
-
-    def _hazards_vec(self, side_conditions: dict) -> list[float]:
-        # Scale layers to [0,1]; spikes (0..3) /3, tspikes (0..2) /2; rocks/web are booleans.
-        spikes = min(side_conditions.get("spikes", 0), 3) / 3.0
-        tsp = min(side_conditions.get("toxicspikes", 0), 2) / 2.0
-        rocks = 1.0 if "stealthrock" in side_conditions else 0.0
-        web = 1.0 if "stickyweb" in side_conditions else 0.0
-        return [rocks, spikes, tsp, web]
-
-    def _move_feats(self, mv, self_mon, opp_mon) -> list[float]:
-        if mv is None:
-            return [0.0, 0.0, 0.0, 0.0]
-        bp = float(getattr(mv, "base_power", 0.0)) / 200.0
-        stab = (
-            1.0
-            if (
-                mv.type is not None
-                and self_mon is not None
-                and mv.type in getattr(self_mon, "types", [])
-            )
-            else 0.0
-        )
-        # crude effectiveness estimate if types are known
-        eff = getattr(mv, "type", None)
-        if eff is None or opp_mon is None or not getattr(opp_mon, "types", None):
-            effv = 0.66  # “unknown” ~ neutral-ish
-        else:
-            try:
-                effx = mv.type.damage_multiplier(*opp_mon.types)  # poke-env type chart
-                effv = {0: 0.0, 0.5: 0.33, 1: 0.66, 2: 1.0, 4: 1.0}.get(effx, 0.66)
-            except Exception:
-                effv = 0.66
-        ppf = 0.0
-        if hasattr(mv, "current_pp") and getattr(mv, "max_pp", 0):
-            ppf = mv.current_pp / mv.max_pp
-        return [bp, stab, effv, ppf]
 
     def get_additional_info(self) -> Dict[str, Dict[str, Any]]:
         info = super().get_additional_info()
@@ -167,96 +95,13 @@ class ShowdownEnvironment(BaseShowdownEnv):
         # Penalty for losing your own health
         reward -= np.sum(diff_health_team)
 
-        faint_team = [mon.fainted for mon in battle.team.values()]
-        faint_opponent = [mon.fainted for mon in battle.opponent_team.values()]
-
-        if len(faint_opponent) < len(faint_team):
-            faint_opponent.extend([False] * (len(faint_team) - len(faint_opponent)))
-
-        prior_faint_team = []
-        prior_faint_opponent = []
-
-        if prior_battle is not None:
-            prior_faint_opponent = [
-                mon.fainted for mon in prior_battle.opponent_team.values()
-            ]
-            prior_faint_team = [mon.fainted for mon in prior_battle.team.values()]
-
-        if len(prior_faint_opponent) < len(faint_team):
-            prior_faint_opponent.extend(
-                [False] * (len(faint_team) - len(prior_faint_opponent))
-            )
-
-        if len(prior_faint_team) < len(faint_team):
-            prior_faint_team.extend([False] * (len(faint_team) - len(prior_faint_team)))
-
-        diff_faint_team = np.array(prior_faint_team) - np.array(faint_team)
-        diff_faint_opponent = np.array(prior_faint_opponent) - np.array(faint_opponent)
-
-        reward += np.sum(diff_faint_opponent)
-        reward -= np.sum(diff_faint_team)
-
-        my_sc_now = getattr(battle, "side_conditions", {}) or {}
-        opp_sc_now = getattr(battle, "opponent_side_conditions", {}) or {}
-        my_sc_prv = getattr(prior_battle, "side_conditions", {}) or {}
-        opp_sc_prv = getattr(prior_battle, "opponent_side_conditions", {}) or {}
-
-        def _haz_vec(sc: dict) -> np.ndarray:
-            # rocks/web are booleans, spikes/tspikes are layer counts
-            rocks = 1.0 if "stealthrock" in sc else 0.0
-            spikes = float(sc.get("spikes", 0))
-            tsp = float(sc.get("toxicspikes", 0))
-            web = 1.0 if "stickyweb" in sc else 0.0
-            return np.array([rocks, spikes, tsp, web], dtype=np.float32)
-
-        diff_haz_opp = _haz_vec(opp_sc_prv) - _haz_vec(opp_sc_now)
-        diff_haz_me = _haz_vec(my_sc_prv) - _haz_vec(my_sc_now)
-
-        reward -= np.sum(diff_haz_opp)
-        reward += np.sum(diff_haz_me)
-
-        status_team = [
-            int(getattr(mon, "status", None) in _STATUS) for mon in battle.team.values()
-        ]
-        status_opp = [
-            int(getattr(mon, "status", None) in _STATUS)
-            for mon in battle.opponent_team.values()
-        ]
-
-        # Pad opponent to match team length (same as you did above)
-        if len(status_opp) < len(status_team):
-            status_opp.extend([0] * (len(status_team) - len(status_opp)))
-
-        prior_status_team = []
-        prior_status_opp = []
-        if prior_battle is not None:
-            prior_status_team = [
-                int(getattr(mon, "status", None) in _STATUS)
-                for mon in prior_battle.team.values()
-            ]
-            prior_status_opp = [
-                int(getattr(mon, "status", None) in _STATUS)
-                for mon in prior_battle.opponent_team.values()
-            ]
-
-        if len(prior_status_opp) < len(status_team):
-            prior_status_opp.extend([0] * (len(status_team) - len(prior_status_opp)))
-        if len(prior_status_team) < len(status_team):
-            prior_status_team.extend([0] * (len(status_team) - len(prior_status_team)))
-
-        diff_status_opp = np.array(prior_status_opp) - np.array(status_opp)
-        diff_status_me = np.array(prior_status_team) - np.array(status_team)
-
-        reward -= np.sum(diff_status_opp)
-        reward += np.sum(diff_status_me)
-
         return reward
 
     def _observation_size(self) -> int:
         """
         Returns the size of the observation size to create the observation space for all possible agents in the environment.
 
-        You need to set observation size to the number of features you want to include in the observation.
+        You need to set obvervation size to the number of features you want to include in the observation.
         Annoyingly, you need to set this manually based on the features you want to include in the observation from emded_battle.
 
         Returns:
@@ -265,7 +110,7 @@ class ShowdownEnvironment(BaseShowdownEnv):
 
         # Simply change this number to the number of features you want to include in the observation from embed_battle.
         # If you find a way to automate this, please let me know!
-        return 40
+        return 12
 
     def embed_battle(self, battle: AbstractBattle) -> np.ndarray:
         """
@@ -282,66 +127,28 @@ class ShowdownEnvironment(BaseShowdownEnv):
             np.float32: A 1D numpy array containing the state you want the agent to observe.
         """
 
-        # health_team = [mon.current_hp_fraction for mon in battle.team.values()]
-        # health_opponent = [
-        #     mon.current_hp_fraction for mon in battle.opponent_team.values()
-        # ]
+        health_team = [mon.current_hp_fraction for mon in battle.team.values()]
+        health_opponent = [
+            mon.current_hp_fraction for mon in battle.opponent_team.values()
+        ]
 
-        # # Ensure health_opponent has 6 components, filling missing values with 1.0 (fraction of health)
-        # if len(health_opponent) < len(health_team):
-        #     health_opponent.extend([1.0] * (len(health_team) - len(health_opponent)))
+        # Ensure health_opponent has 6 components, filling missing values with 1.0 (fraction of health)
+        if len(health_opponent) < len(health_team):
+            health_opponent.extend([1.0] * (len(health_team) - len(health_opponent)))
 
-        # #########################################################################################################
-        # # Caluclate the length of the final_vector and make sure to update the value in _observation_size above #
-        # #########################################################################################################
+        #########################################################################################################
+        # Caluclate the length of the final_vector and make sure to update the value in _observation_size above #
+        #########################################################################################################
 
-        # # Final vector - single array with health of both teams
-        # final_vector = np.concatenate(
-        #     [
-        #         health_team,  # N components for the health of each pokemon
-        #         health_opponent,  # N components for the health of opponent pokemon
-        #     ]
-        # ).astype(np.float32, copy=False)
+        # Final vector - single array with health of both teams
+        final_vector = np.concatenate(
+            [
+                health_team,  # N components for the health of each pokemon
+                health_opponent,  # N components for the health of opponent pokemon
+            ]
+        ).astype(np.float32, copy=False)
 
-        # return final_vector
-
-        me = battle.active_pokemon
-        opp = battle.opponent_active_pokemon
-        # Self active (8)
-        self_block = (
-            [getattr(me, "current_hp_fraction", 0.0)]
-            + self._one_hot_status(me)
-            + [self._boost_sum_norm(me)]
-        )
-        # Opp active (7)
-        known_opp_moves = len(getattr(opp, "moves", {}))
-        opp_block = (
-            [getattr(opp, "current_hp_fraction", 0.0)]
-            + self._one_hot_status(opp)
-            + [min(4, known_opp_moves) / 4.0]
-        )
-        # Field + counts (9)
-        my_alive = sum(1 for m in battle.team.values() if m.fainted is False)
-        opp_alive = sum(1 for m in battle.opponent_team.values() if m.fainted is False)
-        field_block = (
-            self._field_weather_one_hot(battle)
-            + self._screens_flags(battle.side_conditions)
-            + [my_alive / 6.0, opp_alive / 6.0]
-        )
-        # Hazards (ours 4 + theirs 4 = 8)
-        haz_block = self._hazards_vec(battle.side_conditions) + self._hazards_vec(
-            battle.opponent_side_conditions
-        )
-        # Moves (2 x 4 = 8)
-        legal = list(battle.available_moves) if battle.available_moves else []
-        m0 = self._move_feats(legal[0] if len(legal) > 0 else None, me, opp)
-        m1 = self._move_feats(legal[1] if len(legal) > 1 else None, me, opp)
-        moves_block = m0 + m1
-        vec = np.array(
-            self_block + opp_block + field_block + haz_block + moves_block,
-            dtype=np.float32,
-        )
-        return vec
+        return final_vector
 
 
 ########################################
