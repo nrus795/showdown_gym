@@ -15,6 +15,12 @@ from poke_env.player.player import Player
 
 from showdown_gym.base_environment import BaseShowdownEnv
 
+KO_WEIGHT = 3.0
+WIN_BONUS = 25.0
+LOSS_PENALTY = 25.0
+STEP_PENALTY = -0.01
+REWARD_CLIP = 50.0
+
 
 class ShowdownEnvironment(BaseShowdownEnv):
     def __init__(
@@ -81,23 +87,25 @@ class ShowdownEnvironment(BaseShowdownEnv):
                 mon.current_hp_fraction for mon in prior_battle.team.values()
             ]
 
-        # Ensure health_opponent has 6 components, filling missing values with 1.0 (fraction of health)
+        # Ensure prior_health_opponent has 6 components, filling missing values with 1.0
         if len(prior_health_opponent) < len(health_team):
             prior_health_opponent.extend(
                 [1.0] * (len(health_team) - len(prior_health_opponent))
             )
 
+        # If no prior state yet, use current so diffs are zero on the first step
+        if prior_battle is None:
+            prior_health_team = health_team.copy()
+            prior_health_opponent = health_opponent.copy()
+
         diff_health_opponent = np.array(prior_health_opponent) - np.array(
             health_opponent
         )
-
         diff_health_team = np.array(prior_health_team) - np.array(health_team)
 
-        # Reward for reducing the opponent's health
-        reward += np.sum(diff_health_opponent)
-
-        # Penalty for losing your own health
-        reward -= np.sum(diff_health_team)
+        # Reward for reducing the opponent's health; penalty for our health loss
+        reward += np.sum(diff_health_opponent) * 1.0
+        reward -= np.sum(diff_health_team) * 1.0
 
         faints_team = [sum(1 for mon in battle.team.values() if mon.fainted)]
         faints_opponent = [
@@ -106,7 +114,6 @@ class ShowdownEnvironment(BaseShowdownEnv):
 
         prior_faints_opponent = []
         prior_faints_team = []
-
         if prior_battle is not None:
             prior_faints_opponent = [
                 sum(1 for mon in prior_battle.opponent_team.values() if mon.fainted)
@@ -115,21 +122,32 @@ class ShowdownEnvironment(BaseShowdownEnv):
                 sum(1 for mon in prior_battle.team.values() if mon.fainted)
             ]
 
+        if prior_battle is None:
+            prior_faints_opponent = faints_opponent.copy()
+            prior_faints_team = faints_team.copy()
+
+        # Use the same diff direction as HP (prior - current), but flip sign so KOs are positive
         diff_faints_opponent = np.array(prior_faints_opponent) - np.array(
             faints_opponent
         )
         diff_faints_team = np.array(prior_faints_team) - np.array(faints_team)
 
-        reward += np.sum(diff_faints_opponent) * 1.1
-        reward -= np.sum(diff_faints_team) * 1.1
+        reward += (
+            -np.sum(diff_faints_opponent)
+        ) * KO_WEIGHT  # opponent KO gained -> positive
+        reward -= (-np.sum(diff_faints_team)) * KO_WEIGHT  # our KO suffered -> negative
+
+        # Small per-step nudge to end games sooner
+        reward += STEP_PENALTY
 
         if battle.finished:
             if battle.won:
-                reward += 1.0
+                reward += WIN_BONUS
             elif battle.lost:
-                reward -= 1.0
+                reward -= LOSS_PENALTY
 
-        return reward
+        # keep gradients sane
+        return float(np.clip(reward, -REWARD_CLIP, REWARD_CLIP))
 
     def _observation_size(self) -> int:
         """
