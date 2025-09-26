@@ -1,15 +1,19 @@
 import os
+import time
 from typing import Any, Dict
 
 import numpy as np
-from poke_env import MaxBasePowerPlayer, RandomPlayer, SimpleHeuristicsPlayer
+from poke_env import (
+    AccountConfiguration,
+    MaxBasePowerPlayer,
+    RandomPlayer,
+    SimpleHeuristicsPlayer,
+)
 from poke_env.battle import AbstractBattle
 from poke_env.environment.single_agent_wrapper import SingleAgentWrapper
 from poke_env.player.player import Player
 
 from showdown_gym.base_environment import BaseShowdownEnv
-
-STATUSES = {"BRN", "PAR", "PSN", "SLP", "FRZ"}
 
 
 class ShowdownEnvironment(BaseShowdownEnv):
@@ -36,7 +40,6 @@ class ShowdownEnvironment(BaseShowdownEnv):
         if self.battle1 is not None:
             agent = self.possible_agents[0]
             info[agent]["win"] = self.battle1.won
-            info[agent]["turns"] = self.battle1.turn
 
         return info
 
@@ -47,167 +50,61 @@ class ShowdownEnvironment(BaseShowdownEnv):
         You need to implement this method to define how the reward is calculated
 
         Args:
-                battle (AbstractBattle): The current battle instance containing information
-                        about the player's team and the opponent's team from the player's perspective.
-                prior_battle (AbstractBattle): The prior battle instance to compare against.
+            battle (AbstractBattle): The current battle instance containing information
+                about the player's team and the opponent's team from the player's perspective.
+            prior_battle (AbstractBattle): The prior battle instance to compare against.
         Returns:
-                float: The calculated reward based on the change in state of the battle.
+            float: The calculated reward based on the change in state of the battle.
         """
 
         prior_battle = self._get_prior_battle(battle)
-        if prior_battle is None:
-            return 0.0
 
-        # Weights (tweak if needed)
-        KO_W = 0.5
-        HAZ_W = 0.2
-        STATUS_W = 0.1
-        HP_W = 0.5
-        STEP_PENALTY = 0.01
-        WIN_BONUS = 15.0
-        LOSS_PENALTY = 5.0
-        PER_MON_CAP = (
-            0.5  # cap per-mon HP changes to avoid large swings from e.g. explosion
-        )
         reward = 0.0
 
-        # -----------------------------
-        # HP: deal dmg (good), take dmg (bad)
-        # -----------------------------
         health_team = [mon.current_hp_fraction for mon in battle.team.values()]
         health_opponent = [
             mon.current_hp_fraction for mon in battle.opponent_team.values()
         ]
+
+        # If the opponent has less than 6 Pokémon, fill the missing values with 1.0 (fraction of health)
         if len(health_opponent) < len(health_team):
             health_opponent.extend([1.0] * (len(health_team) - len(health_opponent)))
 
-        prior_health_team = [
-            mon.current_hp_fraction for mon in prior_battle.team.values()
-        ]
-        prior_health_opponent = [
-            mon.current_hp_fraction for mon in prior_battle.opponent_team.values()
-        ]
+        prior_health_opponent = []
+        if prior_battle is not None:
+            prior_health_opponent = [
+                mon.current_hp_fraction for mon in prior_battle.opponent_team.values()
+            ]
+
+        # Ensure health_opponent has 6 components, filling missing values with 1.0 (fraction of health)
         if len(prior_health_opponent) < len(health_team):
             prior_health_opponent.extend(
                 [1.0] * (len(health_team) - len(prior_health_opponent))
-            )
-        if len(prior_health_team) < len(health_team):
-            prior_health_team.extend(
-                [1.0] * (len(health_team) - len(prior_health_team))
             )
 
         diff_health_opponent = np.array(prior_health_opponent) - np.array(
             health_opponent
         )
-        diff_health_team = np.array(prior_health_team) - np.array(health_team)
 
-        diff_health_opponent = np.clip(diff_health_opponent, -PER_MON_CAP, PER_MON_CAP)
-        diff_health_team = np.clip(diff_health_team, -PER_MON_CAP, PER_MON_CAP)
+        # Reward for reducing the opponent's health
+        reward += np.sum(diff_health_opponent)
 
-        reward += HP_W * float(np.sum(diff_health_opponent))
-        reward -= HP_W * float(np.sum(diff_health_team))
-
-        faint_team = [sum(int(m.fainted) for m in battle.team.values())]
-        faint_opponent = [sum(int(m.fainted) for m in battle.opponent_team.values())]
-        prior_faint_team = [sum(int(m.fainted) for m in prior_battle.team.values())]
-        prior_faint_opponent = [
-            sum(int(m.fainted) for m in prior_battle.opponent_team.values())
-        ]
-
-        if len(prior_faint_opponent) < len(faint_team):
-            prior_faint_opponent.extend(
-                [0] * (len(faint_team) - len(prior_faint_opponent))
-            )
-        if len(prior_faint_team) < len(faint_team):
-            prior_faint_team.extend([0] * (len(faint_team) - len(prior_faint_team)))
-
-        opp_ko_delta = np.array(faint_opponent) - np.array(prior_faint_opponent)
-        me_ko_delta = np.array(faint_team) - np.array(prior_faint_team)
-
-        reward += KO_W * float(np.sum(opp_ko_delta))
-        reward -= KO_W * float(np.sum(me_ko_delta))
-
-        side_conditions_team = getattr(battle, "side_conditions", {}) or {}
-        side_conditions_opponent = getattr(battle, "opponent_side_conditions", {}) or {}
-        prior_side_conditions_team = getattr(prior_battle, "side_conditions", {}) or {}
-        prior_side_conditions_opponent = (
-            getattr(prior_battle, "opponent_side_conditions", {}) or {}
-        )
-
-        def _haz_vec(sc: dict) -> np.ndarray:
-            rocks = 1.0 if "stealthrock" in sc else 0.0
-            spikes = float(sc.get("spikes", 0))
-            tspikes = float(sc.get("toxicspikes", 0))
-            web = 1.0 if "stickyweb" in sc else 0.0
-            return np.array([rocks, spikes, tspikes, web], dtype=np.float32)
-
-        haz_opponent_delta = _haz_vec(side_conditions_opponent) - _haz_vec(
-            prior_side_conditions_opponent
-        )
-        haz_team_delta = _haz_vec(side_conditions_team) - _haz_vec(
-            prior_side_conditions_team
-        )
-
-        reward += HAZ_W * float(np.sum(haz_opponent_delta))
-        reward -= HAZ_W * float(np.sum(haz_team_delta))
-
-        def _status_count(team_dict) -> int:
-            return sum(
-                1 for m in team_dict.values() if getattr(m, "status", None) in STATUSES
-            )
-
-        status_team = [_status_count(battle.team)]
-        status_opponent = [_status_count(battle.opponent_team)]
-        prior_status_team = [_status_count(prior_battle.team)]
-        prior_status_opponent = [_status_count(prior_battle.opponent_team)]
-
-        status_opponent_delta = np.array(status_opponent) - np.array(
-            prior_status_opponent
-        )
-        status_team_delta = np.array(status_team) - np.array(prior_status_team)
-
-        reward += STATUS_W * float(np.sum(status_opponent_delta))
-        reward -= STATUS_W * float(np.sum(status_team_delta))
-
-        def nz(x):
-            return abs(float(x)) > 1e-6
-
-        progress = (
-            nz(np.sum(diff_health_opponent))
-            or nz(np.sum(diff_health_team))
-            or np.any(haz_opponent_delta != 0)
-            or np.any(haz_team_delta != 0)
-            or np.any(status_opponent_delta != 0)
-            or np.any(status_team_delta != 0)
-            or nz(np.sum(opp_ko_delta))
-            or nz(np.sum(me_ko_delta))
-        )
-        if not progress:
-            reward -= STEP_PENALTY  # no progress → small penalty
-
-        prior_finished = bool(getattr(prior_battle, "finished", False))
-        now_finished = getattr(battle, "finished", False)
-        if not prior_finished and now_finished:
-            if battle.won:
-                reward += WIN_BONUS
-            elif battle.lost:
-                reward -= LOSS_PENALTY
         return reward
 
     def _observation_size(self) -> int:
         """
         Returns the size of the observation size to create the observation space for all possible agents in the environment.
 
-        You need to set observation size to the number of features you want to include in the observation.
-        Annoyingly, you need to set this manually based on the features you want to include in the observation from embed_battle.
+        You need to set obvervation size to the number of features you want to include in the observation.
+        Annoyingly, you need to set this manually based on the features you want to include in the observation from emded_battle.
 
         Returns:
-                int: The size of the observation space.
+            int: The size of the observation space.
         """
 
         # Simply change this number to the number of features you want to include in the observation from embed_battle.
         # If you find a way to automate this, please let me know!
-        return 36
+        return 12
 
     def embed_battle(self, battle: AbstractBattle) -> np.ndarray:
         """
@@ -218,105 +115,32 @@ class ShowdownEnvironment(BaseShowdownEnv):
         You need to implement this method to define how the battle state is represented.
 
         Args:
-                battle (AbstractBattle): The current battle instance containing information about
-                        the player's team and the opponent's team.
+            battle (AbstractBattle): The current battle instance containing information about
+                the player's team and the opponent's team.
         Returns:
-                np.float32: A 1D numpy array containing the state you want the agent to observe.
+            np.float32: A 1D numpy array containing the state you want the agent to observe.
         """
 
-        # --- your original health blocks ---
         health_team = [mon.current_hp_fraction for mon in battle.team.values()]
         health_opponent = [
             mon.current_hp_fraction for mon in battle.opponent_team.values()
         ]
 
+        # Ensure health_opponent has 6 components, filling missing values with 1.0 (fraction of health)
         if len(health_opponent) < len(health_team):
             health_opponent.extend([1.0] * (len(health_team) - len(health_opponent)))
 
-        # --- hazards on each side (rocks, spikes/3, tspikes/2, web) ---
-        side_conditions_team = getattr(battle, "side_conditions", {}) or {}
-        side_conditions_opponent = getattr(battle, "opponent_side_conditions", {}) or {}
+        #########################################################################################################
+        # Caluclate the length of the final_vector and make sure to update the value in _observation_size above #
+        #########################################################################################################
 
-        def _hazards(sc: dict) -> list[float]:
-            rocks = 1.0 if "stealthrock" in sc else 0.0
-            spikes = min(sc.get("spikes", 0), 3) / 3.0
-            tspikes = min(sc.get("toxicspikes", 0), 2) / 2.0
-            web = 1.0 if "stickyweb" in sc else 0.0
-            return [rocks, spikes, tspikes, web]
-
-        hazards_team = _hazards(side_conditions_team)  # 4
-        hazards_opponent = _hazards(side_conditions_opponent)  # 4
-
-        # --- screens on each side (reflect, lightscreen, auroraveil) ---
-        def _screens(sc: dict) -> list[float]:
-            keys = ["reflect", "lightscreen", "auroraveil"]
-            return [1.0 if k in sc else 0.0 for k in keys]
-
-        screens_team = _screens(side_conditions_team)  # 3
-        screens_opponent = _screens(side_conditions_opponent)  # 3
-
-        # --- weather one-hot (none, rain, sun, sand, snow) ---
-        weather_names = ["none", "raindance", "sunnyday", "sandstorm", "snow"]
-        weather = [0.0] * 5
-        cur_weather = getattr(battle, "weather", None)
-        idx = 0
-        if (
-            cur_weather is not None
-            and getattr(cur_weather, "name", None) in weather_names
-        ):
-            idx = weather_names.index(cur_weather.name)
-        weather[idx] = 1.0  # 5
-
-        # --- simple counts (alive + status) for each side, normalised by 6 ---
-
-        team_alive = sum(1 for m in battle.team.values() if not m.fainted) / 6.0
-        opponent_alive = (
-            sum(1 for m in battle.opponent_team.values() if not m.fainted) / 6.0
-        )
-        team_status = (
-            sum(
-                1
-                for m in battle.team.values()
-                if getattr(m, "status", None) in STATUSES
-            )
-            / 6.0
-        )
-        opponent_status = (
-            sum(
-                1
-                for m in battle.opponent_team.values()
-                if getattr(m, "status", None) in STATUSES
-            )
-            / 6.0
-        )
-
-        counts_team = [team_alive, team_status]  # 2
-        counts_opponent = [opponent_alive, opponent_status]  # 2
-
-        # --- opponent revealed moves fraction (0..1) ---
-        opponent_active = getattr(battle, "opponent_active_pokemon", None)
-        opponent_revealed_moves = 0.0
-        if (
-            opponent_active is not None
-            and getattr(opponent_active, "moves", None) is not None
-        ):
-            opponent_revealed_moves = min(4, len(opponent_active.moves)) / 4.0  # 1
-
-        # --- final vector (keep your variable name) ---
+        # Final vector - single array with health of both teams
         final_vector = np.concatenate(
             [
-                health_team,  # ~6
-                health_opponent,  # ~6 (padded)
-                hazards_team,  # 4
-                hazards_opponent,  # 4
-                screens_team,  # 3
-                screens_opponent,  # 3
-                weather,  # 5
-                counts_team,  # 2
-                counts_opponent,  # 2
-                [opponent_revealed_moves],  # 1
+                health_team,  # N components for the health of each pokemon
+                health_opponent,  # N components for the health of opponent pokemon
             ]
-        ).astype(np.float32)
+        )
 
         return final_vector
 
@@ -338,11 +162,11 @@ class SingleShowdownWrapper(SingleAgentWrapper):
     Do NOT edit this class!
 
     Attributes:
-            battle_format (str): The format of the Pokémon battle (e.g., "gen9randombattle").
-            opponent_type (str): The type of opponent player to use ("simple", "max", "random").
-            evaluation (bool): Whether the environment is in evaluation mode.
+        battle_format (str): The format of the Pokémon battle (e.g., "gen9randombattle").
+        opponent_type (str): The type of opponent player to use ("simple", "max", "random").
+        evaluation (bool): Whether the environment is in evaluation mode.
     Raises:
-            ValueError: If an unknown opponent type is provided.
+        ValueError: If an unknown opponent type is provided.
     """
 
     def __init__(
@@ -352,20 +176,28 @@ class SingleShowdownWrapper(SingleAgentWrapper):
         evaluation: bool = False,
     ):
         opponent: Player
+        unique_id = time.strftime("%H%M%S")
+
+        opponent_account = "ot" if not evaluation else "oe"
+        opponent_account = f"{opponent_account}_{unique_id}"
+
+        opponent_configuration = AccountConfiguration(opponent_account, None)
         if opponent_type == "simple":
-            opponent = SimpleHeuristicsPlayer()
+            opponent = SimpleHeuristicsPlayer(
+                account_configuration=opponent_configuration
+            )
         elif opponent_type == "max":
-            opponent = MaxBasePowerPlayer()
+            opponent = MaxBasePowerPlayer(account_configuration=opponent_configuration)
         elif opponent_type == "random":
-            opponent = RandomPlayer()
+            opponent = RandomPlayer(account_configuration=opponent_configuration)
         else:
             raise ValueError(f"Unknown opponent type: {opponent_type}")
 
-        account_name_one: str = "train_one" if not evaluation else "eval_one"
-        account_name_two: str = "train_two" if not evaluation else "eval_two"
+        account_name_one: str = "t1" if not evaluation else "e1"
+        account_name_two: str = "t2" if not evaluation else "e2"
 
-        account_name_one = f"{account_name_one}_{opponent_type}"
-        account_name_two = f"{account_name_two}_{opponent_type}"
+        account_name_one = f"{account_name_one}_{unique_id}"
+        account_name_two = f"{account_name_two}_{unique_id}"
 
         team = self._load_team(team_type)
 
