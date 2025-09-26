@@ -46,11 +46,11 @@ class ShowdownEnvironment(BaseShowdownEnv):
         You need to implement this method to define how the reward is calculated
 
         Args:
-            battle (AbstractBattle): The current battle instance containing information
-                about the player's team and the opponent's team from the player's perspective.
-            prior_battle (AbstractBattle): The prior battle instance to compare against.
+                battle (AbstractBattle): The current battle instance containing information
+                        about the player's team and the opponent's team from the player's perspective.
+                prior_battle (AbstractBattle): The prior battle instance to compare against.
         Returns:
-            float: The calculated reward based on the change in state of the battle.
+                float: The calculated reward based on the change in state of the battle.
         """
 
         prior_battle = self._get_prior_battle(battle)
@@ -60,11 +60,14 @@ class ShowdownEnvironment(BaseShowdownEnv):
         # Weights (tweak if needed)
         KO_W = 1.0
         HAZ_W = 0.2
-        STAT_W = 0.1
+        STATUS_W = 0.1
+        HP_W = 0.5
         STEP_PENALTY = 0.01
-        WIN_BONUS = 10.0
-        LOSS_PENALTY = 10.0
-
+        WIN_BONUS = 15.0
+        LOSS_PENALTY = 5.0
+        PER_MON_CAP = (
+            0.5  # cap per-mon HP changes to avoid large swings from e.g. explosion
+        )
         reward = 0.0
 
         # -----------------------------
@@ -97,13 +100,12 @@ class ShowdownEnvironment(BaseShowdownEnv):
         )
         diff_health_team = np.array(prior_health_team) - np.array(health_team)
 
-        reward += float(np.sum(diff_health_opponent))  # we dealt damage → +
-        reward -= float(np.sum(diff_health_team))  # we took damage  → -
+        diff_health_opponent = np.clip(diff_health_opponent, -PER_MON_CAP, PER_MON_CAP)
+        diff_health_team = np.clip(diff_health_team, -PER_MON_CAP, PER_MON_CAP)
 
-        # -----------------------------
-        # KOs since last step
-        # -----------------------------
-        # Keep your extend/padding style (single-element lists for clarity)
+        reward += HP_W * np.sum(diff_health_opponent)
+        reward -= HP_W * np.sum(diff_health_team)
+
         faint_team = [sum(int(m.fainted) for m in battle.team.values())]
         faint_opponent = [sum(int(m.fainted) for m in battle.opponent_team.values())]
         prior_faint_team = [sum(int(m.fainted) for m in prior_battle.team.values())]
@@ -118,20 +120,12 @@ class ShowdownEnvironment(BaseShowdownEnv):
         if len(prior_faint_team) < len(faint_team):
             prior_faint_team.extend([0] * (len(faint_team) - len(prior_faint_team)))
 
-        # deltas (now - prior) so that "good" is positive
-        opp_ko_delta = np.array(faint_opponent, dtype=np.int8) - np.array(
-            prior_faint_opponent, dtype=np.int8
-        )
-        me_ko_delta = np.array(faint_team, dtype=np.int8) - np.array(
-            prior_faint_team, dtype=np.int8
-        )
+        opp_ko_delta = np.array(prior_faint_opponent) - np.array(faint_opponent)
+        me_ko_delta = np.array(prior_faint_team) - np.array(faint_team)
 
-        reward += KO_W * float(np.sum(opp_ko_delta))  # new KO on them → +
-        reward -= KO_W * float(np.sum(me_ko_delta))  # new KO on us   → -
+        reward += KO_W * np.sum(opp_ko_delta)
+        reward -= KO_W * np.sum(me_ko_delta)
 
-        # -----------------------------
-        # Hazards (rocks, spikes, tspikes, web)
-        # -----------------------------
         side_conditions_team = getattr(battle, "side_conditions", {}) or {}
         side_conditions_opponent = getattr(battle, "opponent_side_conditions", {}) or {}
         prior_side_conditions_team = getattr(prior_battle, "side_conditions", {}) or {}
@@ -146,20 +140,16 @@ class ShowdownEnvironment(BaseShowdownEnv):
             web = 1.0 if "stickyweb" in sc else 0.0
             return np.array([rocks, spikes, tspikes, web], dtype=np.float32)
 
-        # now - prior so that "adding on opponent" is positive, "adding on us" is negative
-        haz_opponent_delta = _haz_vec(side_conditions_opponent) - _haz_vec(
-            prior_side_conditions_opponent
+        haz_opponent_delta = _haz_vec(prior_side_conditions_opponent) - _haz_vec(
+            side_conditions_opponent
         )
-        haz_team_delta = _haz_vec(side_conditions_team) - _haz_vec(
-            prior_side_conditions_team
+        haz_team_delta = _haz_vec(prior_side_conditions_team) - _haz_vec(
+            side_conditions_team
         )
 
-        reward += HAZ_W * float(np.sum(haz_opponent_delta))  # hazards added on them → +
-        reward -= HAZ_W * float(np.sum(haz_team_delta))  # hazards added on us   → -
+        reward += HAZ_W * np.sum(haz_opponent_delta)
+        reward -= HAZ_W * np.sum(haz_team_delta)
 
-        # -----------------------------
-        # Statuses (BRN/PAR/PSN/SLP/FRZ)
-        # -----------------------------
         def _status_count(team_dict) -> int:
             return sum(
                 1 for m in team_dict.values() if getattr(m, "status", None) in STATUSES
@@ -170,22 +160,26 @@ class ShowdownEnvironment(BaseShowdownEnv):
         prior_status_team = [_status_count(prior_battle.team)]
         prior_status_opponent = [_status_count(prior_battle.opponent_team)]
 
-        status_opponent_delta = np.array(status_opponent, dtype=np.int8) - np.array(
-            prior_status_opponent, dtype=np.int8
+        status_opponent_delta = np.array(status_opponent) - np.array(
+            prior_status_opponent
         )
-        status_team_delta = np.array(status_team, dtype=np.int8) - np.array(
-            prior_status_team, dtype=np.int8
+        status_team_delta = np.array(status_team) - np.array(prior_status_team)
+
+        reward += STATUS_W * np.sum(status_opponent_delta)
+        reward -= STATUS_W * np.sum(status_team_delta)
+
+        progress = (
+            float(np.sum(diff_health_opponent)) != 0.0
+            or float(np.sum(diff_health_team)) != 0.0
+            or np.any(haz_opponent_delta != 0)
+            or np.any(haz_team_delta != 0)
+            or np.any(status_opponent_delta != 0)
+            or np.any(status_team_delta != 0)
+            or float(np.sum(opp_ko_delta)) != 0.0
+            or float(np.sum(me_ko_delta)) != 0.0
         )
-
-        reward += STAT_W * float(
-            np.sum(status_opponent_delta)
-        )  # new status on them → +
-        reward -= STAT_W * float(np.sum(status_team_delta))  # new status on us   → -
-
-        # -----------------------------
-        # Step cost + terminal
-        # -----------------------------
-        reward -= STEP_PENALTY
+        if not progress:
+            reward -= STEP_PENALTY  # no progress → small penalty
         if battle.won:
             reward += WIN_BONUS
         elif battle.lost:
@@ -197,11 +191,11 @@ class ShowdownEnvironment(BaseShowdownEnv):
         """
         Returns the size of the observation size to create the observation space for all possible agents in the environment.
 
-        You need to set obvervation size to the number of features you want to include in the observation.
-        Annoyingly, you need to set this manually based on the features you want to include in the observation from emded_battle.
+        You need to set observation size to the number of features you want to include in the observation.
+        Annoyingly, you need to set this manually based on the features you want to include in the observation from embed_battle.
 
         Returns:
-            int: The size of the observation space.
+                int: The size of the observation space.
         """
 
         # Simply change this number to the number of features you want to include in the observation from embed_battle.
@@ -217,10 +211,10 @@ class ShowdownEnvironment(BaseShowdownEnv):
         You need to implement this method to define how the battle state is represented.
 
         Args:
-            battle (AbstractBattle): The current battle instance containing information about
-                the player's team and the opponent's team.
+                battle (AbstractBattle): The current battle instance containing information about
+                        the player's team and the opponent's team.
         Returns:
-            np.float32: A 1D numpy array containing the state you want the agent to observe.
+                np.float32: A 1D numpy array containing the state you want the agent to observe.
         """
 
         # --- your original health blocks ---
@@ -337,11 +331,11 @@ class SingleShowdownWrapper(SingleAgentWrapper):
     Do NOT edit this class!
 
     Attributes:
-        battle_format (str): The format of the Pokémon battle (e.g., "gen9randombattle").
-        opponent_type (str): The type of opponent player to use ("simple", "max", "random").
-        evaluation (bool): Whether the environment is in evaluation mode.
+            battle_format (str): The format of the Pokémon battle (e.g., "gen9randombattle").
+            opponent_type (str): The type of opponent player to use ("simple", "max", "random").
+            evaluation (bool): Whether the environment is in evaluation mode.
     Raises:
-        ValueError: If an unknown opponent type is provided.
+            ValueError: If an unknown opponent type is provided.
     """
 
     def __init__(
@@ -368,10 +362,10 @@ class SingleShowdownWrapper(SingleAgentWrapper):
 
         team = self._load_team(team_type)
 
-        battle_fomat = "gen9randombattle" if team is None else "gen9ubers"
+        battle_format = "gen9randombattle" if team is None else "gen9ubers"
 
         primary_env = ShowdownEnvironment(
-            battle_format=battle_fomat,
+            battle_format=battle_format,
             account_name_one=account_name_one,
             account_name_two=account_name_two,
             team=team,
