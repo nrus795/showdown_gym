@@ -15,13 +15,6 @@ from poke_env.player.player import Player
 
 from showdown_gym.base_environment import BaseShowdownEnv
 
-TEAM_SIZE = 6  # fixed for formats with 6 Pokémon
-WIN_BONUS = 10.0
-LOSS_PENALTY = -10.0
-STEP_PENALTY = -0.01  # encourages faster finishes
-KO_BONUS = 1.1
-REWARD_CLIP = 50.0  # clip rewards to avoid large updates
-
 
 class ShowdownEnvironment(BaseShowdownEnv):
     def __init__(
@@ -47,25 +40,9 @@ class ShowdownEnvironment(BaseShowdownEnv):
         if self.battle1 is not None:
             agent = self.possible_agents[0]
             info[agent]["win"] = self.battle1.won
-            info[agent]["turn"] = int(self.battle1.turn)
+            info[agent]["turns"] = self.battle1.turn
 
         return info
-
-    def _hp_vector(self, mons) -> np.ndarray:
-        ordered = sorted(
-            mons, key=lambda m: getattr(m, "species", "") or getattr(m, "nickname", "")
-        )
-        vals = []
-        for m in ordered:
-            v = getattr(m, "current_hp_fraction", None)
-            # Treat unknown HP as 1.0 so you don't get random negative rewards
-            vals.append(1.0 if v is None else float(v))
-        vec = np.array(vals, dtype=np.float32)
-        if vec.size < TEAM_SIZE:
-            vec = np.pad(vec, (0, TEAM_SIZE - vec.size), constant_values=1.0)
-        elif vec.size > TEAM_SIZE:
-            vec = vec[:TEAM_SIZE]
-        return vec
 
     def calc_reward(self, battle: AbstractBattle) -> float:
         """
@@ -85,46 +62,73 @@ class ShowdownEnvironment(BaseShowdownEnv):
 
         reward = 0.0
 
-        health_team = []
-        health_opponent = []
+        health_team = [mon.current_hp_fraction for mon in battle.team.values()]
+        health_opponent = [
+            mon.current_hp_fraction for mon in battle.opponent_team.values()
+        ]
 
-        health_opponent = self._hp_vector(battle.opponent_team.values())
-        health_team = self._hp_vector(battle.team.values())
+        # If the opponent has less than 6 Pokémon, fill the missing values with 1.0 (fraction of health)
+        if len(health_opponent) < len(health_team):
+            health_opponent.extend([1.0] * (len(health_team) - len(health_opponent)))
 
         prior_health_opponent = []
         prior_health_team = []
-        if prior_battle is None:
-            prior_health_opponent = np.ones_like(health_opponent)
-            prior_health_team = np.ones_like(health_team)
-        else:
-            prior_health_opponent = self._hp_vector(prior_battle.opponent_team.values())
-            prior_health_team = self._hp_vector(prior_battle.team.values())
+        if prior_battle is not None:
+            prior_health_opponent = [
+                mon.current_hp_fraction for mon in prior_battle.opponent_team.values()
+            ]
+            prior_health_team = [
+                mon.current_hp_fraction for mon in prior_battle.team.values()
+            ]
 
-        diff_health_opponent = prior_health_opponent - health_opponent
-        diff_health_team = prior_health_team - health_team
+        # Ensure health_opponent has 6 components, filling missing values with 1.0 (fraction of health)
+        if len(prior_health_opponent) < len(health_team):
+            prior_health_opponent.extend(
+                [1.0] * (len(health_team) - len(prior_health_opponent))
+            )
+
+        diff_health_opponent = np.array(prior_health_opponent) - np.array(
+            health_opponent
+        )
+
+        diff_health_team = np.array(prior_health_team) - np.array(health_team)
+
+        # Reward for reducing the opponent's health
         reward += np.sum(diff_health_opponent)
+
+        # Penalty for losing your own health
         reward -= np.sum(diff_health_team)
 
-        def _count_fainted(hps: np.ndarray) -> int:
-            return int(np.sum(hps <= 0.0))
+        faints_team = [sum(1 for mon in battle.team.values() if mon.fainted)]
+        faints_opponent = [
+            sum(1 for mon in battle.opponent_team.values() if mon.fainted)
+        ]
 
-        faints_opponent = []
         prior_faints_opponent = []
-        faints_opponent = _count_fainted(health_opponent)
-        prior_faints_opponent = _count_fainted(prior_health_opponent)
+        prior_faints_team = []
 
-        diff_faints_opponent = prior_faints_opponent - faints_opponent
-        reward += diff_faints_opponent * KO_BONUS
+        if prior_battle is not None:
+            prior_faints_opponent = [
+                sum(1 for mon in prior_battle.opponent_team.values() if mon.fainted)
+            ]
+            prior_faints_team = [
+                sum(1 for mon in prior_battle.team.values() if mon.fainted)
+            ]
 
-        # Terminal shaping (kept small/simple)
-        if battle.won:
-            reward += WIN_BONUS
-        elif battle.lost:
-            reward += LOSS_PENALTY
+        diff_faints_opponent = np.array(prior_faints_opponent) - np.array(
+            faints_opponent
+        )
+        diff_faints_team = np.array(prior_faints_team) - np.array(faints_team)
 
-        # Nudge to avoid stalling
-        reward += STEP_PENALTY
-        reward = float(np.clip(reward, -REWARD_CLIP, REWARD_CLIP))
+        reward += np.sum(diff_faints_opponent) * 1.1
+        reward -= np.sum(diff_faints_team) * 1.1
+
+        if battle.finished:
+            if battle.won:
+                reward += 1.0
+            elif battle.lost:
+                reward -= 1.0
+
         return reward
 
     def _observation_size(self) -> int:
@@ -157,8 +161,20 @@ class ShowdownEnvironment(BaseShowdownEnv):
             np.float32: A 1D numpy array containing the state you want the agent to observe.
         """
 
-        health_team = self._hp_vector(battle.team.values())
-        health_opponent = self._hp_vector(battle.opponent_team.values())
+        health_team = [mon.current_hp_fraction for mon in battle.team.values()]
+        health_opponent = [
+            mon.current_hp_fraction for mon in battle.opponent_team.values()
+        ]
+
+        # Ensure health_opponent has 6 components, filling missing values with 1.0 (fraction of health)
+        if len(health_opponent) < len(health_team):
+            health_opponent.extend([1.0] * (len(health_team) - len(health_opponent)))
+
+        #########################################################################################################
+        # Caluclate the length of the final_vector and make sure to update the value in _observation_size above #
+        #########################################################################################################
+
+        # Final vector - single array with health of both teams
         final_vector = np.concatenate(
             [
                 health_team,  # N components for the health of each pokemon
