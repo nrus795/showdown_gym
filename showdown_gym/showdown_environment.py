@@ -65,11 +65,11 @@ class ShowdownEnvironment(BaseShowdownEnv):
 		You need to implement this method to define how the reward is calculated
 
 		Args:
-																																		battle (AbstractBattle): The current battle instance containing information
-																																																																		about the player's team and the opponent's team from the player's perspective.
-																																		prior_battle (AbstractBattle): The prior battle instance to compare against.
+			battle (AbstractBattle): The current battle instance containing information
+			about the player's team and the opponent's team from the player's perspective.
+			prior_battle (AbstractBattle): The prior battle instance to compare against.
 		Returns:
-																																		float: The calculated reward based on the change in state of the battle.
+			float: The calculated reward based on the change in state of the battle.
 		"""
 
 		prior_battle = self._get_prior_battle(battle)
@@ -205,7 +205,7 @@ class ShowdownEnvironment(BaseShowdownEnv):
 		Annoyingly, you need to set this manually based on the features you want to include in the observation from emded_battle.
 
 		Returns:
-																																		int: The size of the observation space.
+			int: The size of the observation space.
 		"""
 
 		# Simply change this number to the number of features you want to include in the observation from embed_battle.
@@ -221,10 +221,10 @@ class ShowdownEnvironment(BaseShowdownEnv):
 		You need to implement this method to define how the battle state is represented.
 
 		Args:
-																																		battle (AbstractBattle): The current battle instance containing information about
-																																																																		the player's team and the opponent's team.
+			battle (AbstractBattle): The current battle instance containing information about
+			the player's team and the opponent's team.
 		Returns:
-																																		np.float32: A 1D numpy array containing the state you want the agent to observe.
+			np.float32: A 1D numpy array containing the state you want the agent to observe.
 		"""
 
 		health_team = [mon.current_hp_fraction for mon in battle.team.values()]
@@ -328,11 +328,11 @@ class SingleShowdownWrapper(SingleAgentWrapper):
 	Do NOT edit this class!
 
 	Attributes:
-																																	battle_format (str): The format of the Pokémon battle (e.g., "gen9randombattle").
-																																	opponent_type (str): The type of opponent player to use ("simple", "max", "random").
-																																	evaluation (bool): Whether the environment is in evaluation mode.
+		battle_format (str): The format of the Pokémon battle (e.g., "gen9randombattle").
+		opponent_type (str): The type of opponent player to use ("simple", "max", "random").
+		evaluation (bool): Whether the environment is in evaluation mode.
 	Raises:
-																																	ValueError: If an unknown opponent type is provided.
+		ValueError: If an unknown opponent type is provided.
 	"""
 
 	def __init__(
