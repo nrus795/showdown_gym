@@ -14,12 +14,21 @@ from poke_env.environment.single_agent_wrapper import SingleAgentWrapper
 from poke_env.player.player import Player
 
 from showdown_gym.base_environment import BaseShowdownEnv
+from poke_env.battle.side_condition import SideCondition
+
+
+STATUSES = ("BRN", "PAR", "PSN", "SLP", "FRZ")
+BOOSTS = ("atk", "def", "spa", "spd", "spe")
+HAZARDS = ("stealthrock", "spikes", "toxicspikes", "stickyweb")
 
 KO_WEIGHT = 3.0
 WIN_BONUS = 25.0
 LOSS_PENALTY = 25.0
 STEP_PENALTY = -0.01
 REWARD_CLIP = 50.0
+SWITCH_PENALTY = 0.02
+HAZARD_SWITCH_PENALTY = 0.02
+STAY_BONUS = 0.005
 
 
 class ShowdownEnvironment(BaseShowdownEnv):
@@ -126,16 +135,57 @@ class ShowdownEnvironment(BaseShowdownEnv):
             prior_faints_opponent = faints_opponent.copy()
             prior_faints_team = faints_team.copy()
 
-        # Use the same diff direction as HP (prior - current), but flip sign so KOs are positive
         diff_faints_opponent = np.array(prior_faints_opponent) - np.array(
             faints_opponent
         )
         diff_faints_team = np.array(prior_faints_team) - np.array(faints_team)
 
-        reward += (
-            -np.sum(diff_faints_opponent)
-        ) * KO_WEIGHT  # opponent KO gained -> positive
-        reward -= (-np.sum(diff_faints_team)) * KO_WEIGHT  # our KO suffered -> negative
+        # Make KOs matter more (opponent KO gained -> positive; our KO suffered -> negative)
+        reward += (-np.sum(diff_faints_opponent)) * KO_WEIGHT
+        reward -= (-np.sum(diff_faints_team)) * KO_WEIGHT
+
+        # Detect a voluntary switch (active changed, we didn't faint to force it)
+        voluntary_switch = False
+        if (
+            prior_battle is not None
+            and prior_battle.active_pokemon is not None
+            and battle.active_pokemon is not None
+        ):
+            if prior_battle.active_pokemon.species != battle.active_pokemon.species:
+                if (np.sum(diff_faints_team) == 0) and (
+                    not prior_battle.active_pokemon.fainted
+                ):
+                    voluntary_switch = True
+
+        # Save for state embedding (next step sees what we just did)
+        self._last_voluntary_switch = 1.0 if voluntary_switch else 0.0
+
+        # Penalise switch spam and hazard entries
+        if voluntary_switch:
+            reward -= SWITCH_PENALTY
+            sc = battle.side_conditions  # our side
+            if SideCondition.STEALTH_ROCK in sc:
+                reward -= HAZARD_SWITCH_PENALTY
+            spikes_layers = sc.get(SideCondition.SPIKES, 0)
+            if spikes_layers:
+                reward -= 0.01 * float(spikes_layers)
+            tox_layers = sc.get(SideCondition.TOXIC_SPIKES, 0)
+            if tox_layers:
+                reward -= 0.01 * float(tox_layers)
+            if SideCondition.STICKY_WEB in sc:
+                reward -= 0.005
+        else:
+            # tiny nudge for staying in when not forced
+            if (
+                prior_battle is not None
+                and prior_battle.active_pokemon is not None
+                and battle.active_pokemon is not None
+            ):
+                if (
+                    prior_battle.active_pokemon.species == battle.active_pokemon.species
+                    and np.sum(diff_faints_team) == 0
+                ):
+                    reward += STAY_BONUS
 
         # Small per-step nudge to end games sooner
         reward += STEP_PENALTY
@@ -146,7 +196,6 @@ class ShowdownEnvironment(BaseShowdownEnv):
             elif battle.lost:
                 reward -= LOSS_PENALTY
 
-        # keep gradients sane
         return float(np.clip(reward, -REWARD_CLIP, REWARD_CLIP))
 
     def _observation_size(self) -> int:
@@ -162,7 +211,7 @@ class ShowdownEnvironment(BaseShowdownEnv):
 
         # Simply change this number to the number of features you want to include in the observation from embed_battle.
         # If you find a way to automate this, please let me know!
-        return 12
+        return 45
 
     def embed_battle(self, battle: AbstractBattle) -> np.ndarray:
         """
@@ -183,22 +232,85 @@ class ShowdownEnvironment(BaseShowdownEnv):
         health_opponent = [
             mon.current_hp_fraction for mon in battle.opponent_team.values()
         ]
-
-        # Ensure health_opponent has 6 components, filling missing values with 1.0 (fraction of health)
         if len(health_opponent) < len(health_team):
             health_opponent.extend([1.0] * (len(health_team) - len(health_opponent)))
 
-        #########################################################################################################
-        # Caluclate the length of the final_vector and make sure to update the value in _observation_size above #
-        #########################################################################################################
+        # faint counts
+        faints_team_count = float(sum(1 for mon in battle.team.values() if mon.fainted))
+        faints_opponent_count = float(
+            sum(1 for mon in battle.opponent_team.values() if mon.fainted)
+        )
 
-        # Final vector - single array with health of both teams
+        # status one-hots for active mons
+        status_self = [0.0] * len(STATUSES)
+        status_opp = [0.0] * len(STATUSES)
+        if battle.active_pokemon is not None:
+            for i, s in enumerate(STATUSES):
+                status_self[i] = 1.0 if battle.active_pokemon.status == s else 0.0
+        if getattr(battle, "opponent_active_pokemon", None) is not None:
+            for i, s in enumerate(STATUSES):
+                status_opp[i] = (
+                    1.0 if battle.opponent_active_pokemon.status == s else 0.0
+                )
+
+        # boosts for active mons (normalised by 6)
+        boosts_self = [0.0] * len(BOOSTS)
+        boosts_opp = [0.0] * len(BOOSTS)
+        if battle.active_pokemon is not None:
+            for i, k in enumerate(BOOSTS):
+                boosts_self[i] = float(battle.active_pokemon.boosts.get(k, 0)) / 6.0
+        if getattr(battle, "opponent_active_pokemon", None) is not None:
+            for i, k in enumerate(BOOSTS):
+                boosts_opp[i] = (
+                    float(battle.opponent_active_pokemon.boosts.get(k, 0)) / 6.0
+                )
+
+        # hazards on each side
+        sc_self = battle.side_conditions
+        sc_opp = battle.opponent_side_conditions
+
+        hazards_self = [
+            1.0 if SideCondition.STEALTH_ROCK in sc_self else 0.0,
+            float(sc_self.get(SideCondition.SPIKES, 0)) / 3.0,
+            float(sc_self.get(SideCondition.TOXIC_SPIKES, 0)) / 2.0,
+            1.0 if SideCondition.STICKY_WEB in sc_self else 0.0,
+        ]
+        hazards_opp = [
+            1.0 if SideCondition.STEALTH_ROCK in sc_opp else 0.0,
+            float(sc_opp.get(SideCondition.SPIKES, 0)) / 3.0,
+            float(sc_opp.get(SideCondition.TOXIC_SPIKES, 0)) / 2.0,
+            1.0 if SideCondition.STICKY_WEB in sc_opp else 0.0,
+        ]
+
+        # a few scalars that help policy
+        last_voluntary_switch = float(getattr(self, "_last_voluntary_switch", 0.0))
+        available_switches_norm = (
+            float(len(getattr(battle, "available_switches", []))) / 5.0
+        )
+        turn_norm = float(min(getattr(battle, "turn", 0), 100)) / 100.0
+
         final_vector = np.concatenate(
             [
-                health_team,  # N components for the health of each pokemon
-                health_opponent,  # N components for the health of opponent pokemon
+                np.array(health_team, dtype=np.float32),  # 6
+                np.array(health_opponent, dtype=np.float32),  # 6
+                np.array(
+                    [faints_team_count, faints_opponent_count], dtype=np.float32
+                ),  # 2
+                np.array(status_self, dtype=np.float32),  # 5
+                np.array(status_opp, dtype=np.float32),  # 5
+                np.array(boosts_self, dtype=np.float32),  # 5
+                np.array(boosts_opp, dtype=np.float32),  # 5
+                np.array(hazards_self, dtype=np.float32),  # 4
+                np.array(hazards_opp, dtype=np.float32),  # 4
+                np.array(
+                    [last_voluntary_switch, available_switches_norm, turn_norm],
+                    dtype=np.float32,
+                ),  # 3
             ]
         )
+
+        # Optional: quick sanity check during dev
+        # assert final_vector.shape[0] == self._observation_size()
 
         return final_vector.astype(np.float32)
 
