@@ -19,6 +19,8 @@ TEAM_SIZE = 6  # fixed for formats with 6 Pokémon
 WIN_BONUS = 10.0
 LOSS_PENALTY = -10.0
 STEP_PENALTY = -0.01  # encourages faster finishes
+KO_BONUS = 1.1
+REWARD_CLIP = 50.0  # clip rewards to avoid large updates
 
 
 class ShowdownEnvironment(BaseShowdownEnv):
@@ -50,16 +52,15 @@ class ShowdownEnvironment(BaseShowdownEnv):
         return info
 
     def _hp_vector(self, mons) -> np.ndarray:
-        """
-        Stable, fixed-length vector of HP fractions for a side.
-        Pads unrevealed slots to 1.0. Returns float32 as requested.
-        """
-        # Sort to keep a stable order across steps (revealed subset).
-        # Fallbacks guard against missing species names.
         ordered = sorted(
             mons, key=lambda m: getattr(m, "species", "") or getattr(m, "nickname", "")
         )
-        vec = np.fromiter((m.current_hp_fraction for m in ordered), dtype=np.float32)
+        vals = []
+        for m in ordered:
+            v = getattr(m, "current_hp_fraction", None)
+            # Treat unknown HP as 1.0 so you don't get random negative rewards
+            vals.append(1.0 if v is None else float(v))
+        vec = np.array(vals, dtype=np.float32)
         if vec.size < TEAM_SIZE:
             vec = np.pad(vec, (0, TEAM_SIZE - vec.size), constant_values=1.0)
         elif vec.size > TEAM_SIZE:
@@ -84,8 +85,14 @@ class ShowdownEnvironment(BaseShowdownEnv):
 
         reward = 0.0
 
+        health_team = []
+        health_opponent = []
+
         health_opponent = self._hp_vector(battle.opponent_team.values())
         health_team = self._hp_vector(battle.team.values())
+
+        prior_health_opponent = []
+        prior_health_team = []
         if prior_battle is None:
             prior_health_opponent = np.ones_like(health_opponent)
             prior_health_team = np.ones_like(health_team)
@@ -98,6 +105,17 @@ class ShowdownEnvironment(BaseShowdownEnv):
         reward += np.sum(diff_health_opponent)
         reward -= np.sum(diff_health_team)
 
+        def _count_fainted(hps: np.ndarray) -> int:
+            return int(np.sum(hps <= 0.0))
+
+        faints_opponent = []
+        prior_faints_opponent = []
+        faints_opponent = _count_fainted(health_opponent)
+        prior_faints_opponent = _count_fainted(prior_health_opponent)
+
+        diff_faints_opponent = prior_faints_opponent - faints_opponent
+        reward += diff_faints_opponent * KO_BONUS
+
         # Terminal shaping (kept small/simple)
         if battle.won:
             reward += WIN_BONUS
@@ -106,7 +124,7 @@ class ShowdownEnvironment(BaseShowdownEnv):
 
         # Nudge to avoid stalling
         reward += STEP_PENALTY
-
+        reward = float(np.clip(reward, -REWARD_CLIP, REWARD_CLIP))
         return reward
 
     def _observation_size(self) -> int:
