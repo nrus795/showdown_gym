@@ -36,6 +36,7 @@ class ShowdownEnvironment(BaseShowdownEnv):
         if self.battle1 is not None:
             agent = self.possible_agents[0]
             info[agent]["win"] = self.battle1.won
+            info[agent]["turns"] = self.battle1.turn
 
         return info
 
@@ -58,7 +59,7 @@ class ShowdownEnvironment(BaseShowdownEnv):
             return 0.0
 
         # Weights (tweak if needed)
-        KO_W = 1.0
+        KO_W = 0.5
         HAZ_W = 0.2
         STATUS_W = 0.1
         HP_W = 0.5
@@ -103,8 +104,8 @@ class ShowdownEnvironment(BaseShowdownEnv):
         diff_health_opponent = np.clip(diff_health_opponent, -PER_MON_CAP, PER_MON_CAP)
         diff_health_team = np.clip(diff_health_team, -PER_MON_CAP, PER_MON_CAP)
 
-        reward += HP_W * np.sum(diff_health_opponent)
-        reward -= HP_W * np.sum(diff_health_team)
+        reward += HP_W * float(np.sum(diff_health_opponent))
+        reward -= HP_W * float(np.sum(diff_health_team))
 
         faint_team = [sum(int(m.fainted) for m in battle.team.values())]
         faint_opponent = [sum(int(m.fainted) for m in battle.opponent_team.values())]
@@ -120,11 +121,11 @@ class ShowdownEnvironment(BaseShowdownEnv):
         if len(prior_faint_team) < len(faint_team):
             prior_faint_team.extend([0] * (len(faint_team) - len(prior_faint_team)))
 
-        opp_ko_delta = np.array(prior_faint_opponent) - np.array(faint_opponent)
-        me_ko_delta = np.array(prior_faint_team) - np.array(faint_team)
+        opp_ko_delta = np.array(faint_opponent) - np.array(prior_faint_opponent)
+        me_ko_delta = np.array(faint_team) - np.array(prior_faint_team)
 
-        reward += KO_W * np.sum(opp_ko_delta)
-        reward -= KO_W * np.sum(me_ko_delta)
+        reward += KO_W * float(np.sum(opp_ko_delta))
+        reward -= KO_W * float(np.sum(me_ko_delta))
 
         side_conditions_team = getattr(battle, "side_conditions", {}) or {}
         side_conditions_opponent = getattr(battle, "opponent_side_conditions", {}) or {}
@@ -140,15 +141,15 @@ class ShowdownEnvironment(BaseShowdownEnv):
             web = 1.0 if "stickyweb" in sc else 0.0
             return np.array([rocks, spikes, tspikes, web], dtype=np.float32)
 
-        haz_opponent_delta = _haz_vec(prior_side_conditions_opponent) - _haz_vec(
-            side_conditions_opponent
+        haz_opponent_delta = _haz_vec(side_conditions_opponent) - _haz_vec(
+            prior_side_conditions_opponent
         )
-        haz_team_delta = _haz_vec(prior_side_conditions_team) - _haz_vec(
-            side_conditions_team
+        haz_team_delta = _haz_vec(side_conditions_team) - _haz_vec(
+            prior_side_conditions_team
         )
 
-        reward += HAZ_W * np.sum(haz_opponent_delta)
-        reward -= HAZ_W * np.sum(haz_team_delta)
+        reward += HAZ_W * float(np.sum(haz_opponent_delta))
+        reward -= HAZ_W * float(np.sum(haz_team_delta))
 
         def _status_count(team_dict) -> int:
             return sum(
@@ -165,26 +166,32 @@ class ShowdownEnvironment(BaseShowdownEnv):
         )
         status_team_delta = np.array(status_team) - np.array(prior_status_team)
 
-        reward += STATUS_W * np.sum(status_opponent_delta)
-        reward -= STATUS_W * np.sum(status_team_delta)
+        reward += STATUS_W * float(np.sum(status_opponent_delta))
+        reward -= STATUS_W * float(np.sum(status_team_delta))
+
+        def nz(x):
+            return abs(float(x)) > 1e-6
 
         progress = (
-            float(np.sum(diff_health_opponent)) != 0.0
-            or float(np.sum(diff_health_team)) != 0.0
+            nz(np.sum(diff_health_opponent))
+            or nz(np.sum(diff_health_team))
             or np.any(haz_opponent_delta != 0)
             or np.any(haz_team_delta != 0)
             or np.any(status_opponent_delta != 0)
             or np.any(status_team_delta != 0)
-            or float(np.sum(opp_ko_delta)) != 0.0
-            or float(np.sum(me_ko_delta)) != 0.0
+            or nz(np.sum(opp_ko_delta))
+            or nz(np.sum(me_ko_delta))
         )
         if not progress:
             reward -= STEP_PENALTY  # no progress → small penalty
-        if battle.won:
-            reward += WIN_BONUS
-        elif battle.lost:
-            reward -= LOSS_PENALTY
 
+        prior_finished = bool(getattr(prior_battle, "finished", False))
+        now_finished = getattr(battle, "finished", False)
+        if not prior_finished and now_finished:
+            if battle.won:
+                reward += WIN_BONUS
+            elif battle.lost:
+                reward -= LOSS_PENALTY
         return reward
 
     def _observation_size(self) -> int:
