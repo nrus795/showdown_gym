@@ -10,14 +10,7 @@ ignore = [
 	"D206",
 	"UP015",
 	"E203",
-	"E266",
-	"D107",
-	"D100",
-	"D101",
-	"D102",
-	"D401",
-	"D400",
-	"D205",
+	"E266"
 ]
 
 [tool.ruff.format]
@@ -25,8 +18,20 @@ indent-style = "tab"
 quote-style = "preserve"
 skip-magic-trailing-comma = false
 
-[tool.ruff.lint.pydocstyle]
-convention = "numpy"
-
-[tool.ruff.lint.mccabe]
-max-complexity = 30
+[tool.pydocstyle]
+ignore = [	
+	"D107",
+	"D100",
+	"D101",
+	"D102",
+	"D401",
+	"D400",
+	"D205",
+	"D212",
+	"D413",
+	"D406",
+	"D203",
+	"D415",
+	"D411",
+	"D407",
+]

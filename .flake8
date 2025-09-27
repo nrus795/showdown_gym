@@ -5,3 +5,4 @@ exclude = .git,__pycache__,build,dist,venv,.venv
 per-file-ignores =
     tests/*: D
     __init__.py: F401
+max-complexity = 40
