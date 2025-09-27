@@ -1,0 +1,7 @@
+[flake8]
+max-line-length = 100
+extend-ignore = W191,D206,UP015,E203,E266,D107,D100,D101,D102,D401,D400,D205
+exclude = .git,__pycache__,build,dist,venv,.venv
+per-file-ignores =
+    tests/*: D
+    __init__.py: F401
