@@ -11,7 +11,7 @@ from poke_env import (
 )
 from poke_env.battle import AbstractBattle
 from poke_env.battle.side_condition import SideCondition
-from poke_env.data import GenData, to_id_str  # <-- added
+from poke_env.data import GenData, to_id_str
 from poke_env.environment.single_agent_wrapper import SingleAgentWrapper
 from poke_env.player.player import Player
 
@@ -37,14 +37,20 @@ _SWITCH_COOLDOWN_TURNS = 2
 _DECENT_BP = 70
 _MAX_BP_NORM = 150.0
 
-# --- Smart attack/switch shaping (added; magnitudes are small relative to main terms) ---
+# --- Smart attack/switch shaping (small nudges, relative to main terms) ---
 TYPE_HIT_BONUS = 0.03
 INEFFECTIVE_PENALTY = 0.02
 THREAT_SWITCH_BONUS = 0.05
 WASTED_STATUS_PENALTY = 0.02
 SE_THRESHOLD = 2.0
 NO_PROGRESS_EPS = 1e-4
-# ---------------------------------------------------------------------------------------
+# --------------------------------------------------------------------------
+
+# --- Simple Elo tracking (internal, not PS ladder) ---
+ELO_K = 32.0
+ELO_AGENT_INIT = 1000.0
+ELO_OPP_INIT = 1200.0  # if using RandomPlayer, set this to 1000.0; SimpleHeuristics ~1100.0
+# -----------------------------------------------------
 
 
 class ShowdownEnvironment(BaseShowdownEnv):
@@ -63,7 +69,12 @@ class ShowdownEnvironment(BaseShowdownEnv):
 		)
 		self._turns_since_switch = 10
 		self._last_voluntary_switch = 0.0
-		self._type_chart = GenData.from_format(battle_format).type_chart  # <-- added
+		self._type_chart = GenData.from_format(battle_format).type_chart
+
+		# Elo state
+		self._elo_agent_rating = float(ELO_AGENT_INIT)
+		self._elo_opponent_rating = float(ELO_OPP_INIT)
+		self._elo_updated_this_battle = False
 
 	def get_additional_info(self) -> dict[str, dict[str, Any]]:
 		info = super().get_additional_info()
@@ -75,10 +86,13 @@ class ShowdownEnvironment(BaseShowdownEnv):
 			agent = self.possible_agents[0]
 			info[agent]["win"] = self.battle1.won
 			info[agent]["turns"] = self.battle1.turn
+			# expose internal Elo for logging
+			info[agent]["elo_agent"] = round(self._elo_agent_rating, 1)
+			info[agent]["elo_opponent"] = round(self._elo_opponent_rating, 1)
 
 		return info
 
-	# ------------------------ helpers for type-aware shaping (added) ------------------------
+	# ------------------------ helpers for type-aware shaping ------------------------
 
 	def _to_id(self, x) -> str:
 		s = getattr(x, "name", x)
@@ -133,6 +147,25 @@ class ShowdownEnvironment(BaseShowdownEnv):
 			threat = max(threat, m)
 		return float(threat)
 
+	# ------------------------ helpers for Elo tracking ------------------------
+
+	def _elo_expected(self, ra: float, rb: float) -> float:
+		return 1.0 / (1.0 + 10 ** ((rb - ra) / 400.0))
+
+	def _elo_update_once(self, battle: AbstractBattle) -> None:
+		# Score: 1 win, 0 loss, 0.5 tie (rare)
+		if getattr(battle, "won", False):
+			score = 1.0
+		elif getattr(battle, "lost", False):
+			score = 0.0
+		else:
+			score = 0.5
+
+		ra, rb = self._elo_agent_rating, self._elo_opponent_rating
+		ea = self._elo_expected(ra, rb)
+		self._elo_agent_rating = ra + ELO_K * (score - ea)
+		self._elo_opponent_rating = rb + ELO_K * ((1.0 - score) - (1.0 - ea))
+
 	# ---------------------------------------------------------------------------------------
 
 	def calc_reward(self, battle: AbstractBattle) -> float:
@@ -149,6 +182,10 @@ class ShowdownEnvironment(BaseShowdownEnv):
 			float: The calculated reward based on the change in state of the battle.
 		"""
 		prior_battle = self._get_prior_battle(battle)
+
+		# New battle starting (first step): allow Elo to update at the end
+		if prior_battle is None:
+			self._elo_updated_this_battle = False
 
 		reward = 0.0
 
@@ -273,7 +310,12 @@ class ShowdownEnvironment(BaseShowdownEnv):
 			elif battle.lost:
 				reward -= LOSS_PENALTY
 
-		# ---------- Smart attack / switch / status shaping (added) ----------
+			# Elo: update once per finished battle
+			if not self._elo_updated_this_battle:
+				self._elo_update_once(battle)
+				self._elo_updated_this_battle = True
+
+		# ---------- Smart attack / switch / status shaping ----------
 		best_effectiveness_vs_opponent_prev = self._best_offense_multiplier(prior_battle)
 		opponent_threat_prev = self._threat_from_opp(prior_battle)
 
@@ -313,7 +355,7 @@ class ShowdownEnvironment(BaseShowdownEnv):
 		no_progress = (not did_damage) and (not boost_gained)
 		if no_status_change and no_progress:
 			reward -= WASTED_STATUS_PENALTY
-		# ---------- end shaping (added) ----------
+		# ---------- end shaping ----------
 
 		reward = float(np.clip(reward, -REWARD_CLIP, REWARD_CLIP))
 		SCALING = int(round(1 / REWARD_QUANTUM))
