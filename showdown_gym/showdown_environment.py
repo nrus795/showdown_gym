@@ -19,6 +19,8 @@ from showdown_gym.base_environment import BaseShowdownEnv
 STATUSES = ("BRN", "PAR", "PSN", "SLP", "FRZ")
 BOOSTS = ("atk", "def", "spa", "spd", "spe")
 
+REWARD_QUANTUM = 0.001
+
 KO_WEIGHT = 3.0
 WIN_BONUS = 25.0
 LOSS_PENALTY = 25.0
@@ -203,7 +205,10 @@ class ShowdownEnvironment(BaseShowdownEnv):
 			elif battle.lost:
 				reward -= LOSS_PENALTY
 
-		return float(np.clip(reward, -REWARD_CLIP, REWARD_CLIP))
+		reward = float(np.clip(reward, -REWARD_CLIP, REWARD_CLIP))
+		SCALING = int(round(1 / REWARD_QUANTUM))
+		reward = round(reward * SCALING) / SCALING
+		return reward
 
 	def _observation_size(self) -> int:
 		"""
