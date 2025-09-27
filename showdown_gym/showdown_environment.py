@@ -75,6 +75,7 @@ class ShowdownEnvironment(BaseShowdownEnv):
 		self._elo_agent_rating = float(ELO_AGENT_INIT)
 		self._elo_opponent_rating = float(ELO_OPP_INIT)
 		self._elo_updated_this_battle = False
+		self._last_battle_tag = None
 
 	def get_additional_info(self) -> dict[str, dict[str, Any]]:
 		info = super().get_additional_info()
@@ -90,6 +91,14 @@ class ShowdownEnvironment(BaseShowdownEnv):
 			info[agent]["elo_agent"] = round(self._elo_agent_rating, 1)
 			info[agent]["elo_opponent"] = round(self._elo_opponent_rating, 1)
 
+		b = self.battle1
+		if b is not None and getattr(b, "finished", False):
+			if (
+				getattr(b, "battle_tag", None) == self._last_battle_tag
+				and not self._elo_updated_this_battle
+			):
+				self._elo_update_once(b)
+				self._elo_updated_this_battle = True
 		return info
 
 	# ------------------------ helpers for type-aware shaping ------------------------
@@ -184,7 +193,9 @@ class ShowdownEnvironment(BaseShowdownEnv):
 		prior_battle = self._get_prior_battle(battle)
 
 		# New battle starting (first step): allow Elo to update at the end
-		if prior_battle is None:
+		curr_tag = getattr(battle, "battle_tag", None)
+		if curr_tag != self._last_battle_tag:
+			self._last_battle_tag = curr_tag
 			self._elo_updated_this_battle = False
 
 		reward = 0.0
@@ -301,20 +312,6 @@ class ShowdownEnvironment(BaseShowdownEnv):
 					reward += STAY_BONUS
 			self._turns_since_switch = min(self._turns_since_switch + 1, 10)
 
-		# Small per-step nudge to end games sooner
-		reward += STEP_PENALTY
-
-		if battle.finished:
-			if battle.won:
-				reward += WIN_BONUS
-			elif battle.lost:
-				reward -= LOSS_PENALTY
-
-			# Elo: update once per finished battle
-			if not self._elo_updated_this_battle:
-				self._elo_update_once(battle)
-				self._elo_updated_this_battle = True
-
 		# ---------- Smart attack / switch / status shaping ----------
 		best_effectiveness_vs_opponent_prev = self._best_offense_multiplier(prior_battle)
 		opponent_threat_prev = self._threat_from_opp(prior_battle)
@@ -356,6 +353,20 @@ class ShowdownEnvironment(BaseShowdownEnv):
 		if no_status_change and no_progress:
 			reward -= WASTED_STATUS_PENALTY
 		# ---------- end shaping ----------
+
+		# Small per-step nudge to end games sooner
+		reward += STEP_PENALTY
+
+		if battle.finished:
+			if battle.won:
+				reward += WIN_BONUS
+			elif battle.lost:
+				reward -= LOSS_PENALTY
+
+			# Elo: update once per finished battle
+			if not self._elo_updated_this_battle:
+				self._elo_update_once(battle)
+				self._elo_updated_this_battle = True
 
 		reward = float(np.clip(reward, -REWARD_CLIP, REWARD_CLIP))
 		SCALING = int(round(1 / REWARD_QUANTUM))
