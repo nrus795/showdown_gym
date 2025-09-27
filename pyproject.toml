@@ -27,3 +27,6 @@ skip-magic-trailing-comma = false
 
 [tool.ruff.lint.pydocstyle]
 convention = "numpy"
+
+[tool.ruff.lint.mccabe]
+max-complexity = 30
