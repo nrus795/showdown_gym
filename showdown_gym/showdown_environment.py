@@ -50,11 +50,11 @@ class ShowdownEnvironment(BaseShowdownEnv):
 		# Add any additional information you want
 		# to include in the info dictionary that is saved in logs
 		# For example, you can add the win status
-
 		if self.battle1 is not None:
 			agent = self.possible_agents[0]
 			info[agent]["win"] = self.battle1.won
 			info[agent]["turns"] = self.battle1.turn
+
 		return info
 
 	def calc_reward(self, battle: AbstractBattle) -> float:
@@ -64,13 +64,12 @@ class ShowdownEnvironment(BaseShowdownEnv):
 		You need to implement this method to define how the reward is calculated
 
 		Args:
-				battle (AbstractBattle): The current battle instance containing information
-				about the player's team and the opponent's team from the player's perspective.
-				prior_battle (AbstractBattle): The prior battle instance to compare against.
+			battle (AbstractBattle): The current battle instance containing information
+			about the player's team and the opponent's team from the player's perspective.
+			prior_battle (AbstractBattle): The prior battle instance to compare against.
 		Returns:
-				float: The calculated reward based on the change in state of the battle.
+			float: The calculated reward based on the change in state of the battle.
 		"""
-
 		prior_battle = self._get_prior_battle(battle)
 
 		reward = 0.0
@@ -80,9 +79,9 @@ class ShowdownEnvironment(BaseShowdownEnv):
 
 		# If the opponent has less than 6 Pokémon,
 		# fill the missing values with 1.0 (fraction of health)
-
 		if len(health_opponent) < len(health_team):
 			health_opponent.extend([1.0] * (len(health_team) - len(health_opponent)))
+
 		prior_health_opponent = []
 		prior_health_team = []
 		if prior_battle is not None:
@@ -90,20 +89,20 @@ class ShowdownEnvironment(BaseShowdownEnv):
 				mon.current_hp_fraction for mon in prior_battle.opponent_team.values()
 			]
 			prior_health_team = [mon.current_hp_fraction for mon in prior_battle.team.values()]
-		# Ensure prior_health_opponent has 6 components, filling missing values with 1.0
 
+		# Ensure prior_health_opponent has 6 components, filling missing values with 1.0
 		if len(prior_health_opponent) < len(health_team):
 			prior_health_opponent.extend([1.0] * (len(health_team) - len(prior_health_opponent)))
-		# If no prior state yet, use current so diffs are zero on the first step
 
+		# If no prior state yet, use current so diffs are zero on the first step
 		if prior_battle is None:
 			prior_health_team = health_team.copy()
 			prior_health_opponent = health_opponent.copy()
+
 		diff_health_opponent = np.array(prior_health_opponent) - np.array(health_opponent)
 		diff_health_team = np.array(prior_health_team) - np.array(health_team)
 
 		# Reward for reducing the opponent's health; penalty for our health loss
-
 		reward += np.sum(diff_health_opponent) * 1.0
 		reward -= np.sum(diff_health_team) * 1.0
 
@@ -117,19 +116,19 @@ class ShowdownEnvironment(BaseShowdownEnv):
 				sum(1 for mon in prior_battle.opponent_team.values() if mon.fainted)
 			]
 			prior_faints_team = [sum(1 for mon in prior_battle.team.values() if mon.fainted)]
+
 		if prior_battle is None:
 			prior_faints_opponent = faints_opponent.copy()
 			prior_faints_team = faints_team.copy()
+
 		diff_faints_opponent = np.array(prior_faints_opponent) - np.array(faints_opponent)
 		diff_faints_team = np.array(prior_faints_team) - np.array(faints_team)
 
 		# Make KOs matter more (opponent KO gained -> positive; our KO suffered -> negative)
-
 		reward += (-np.sum(diff_faints_opponent)) * KO_WEIGHT
 		reward -= (-np.sum(diff_faints_team)) * KO_WEIGHT
 
 		# Detect a voluntary switch (active changed, we didn't faint to force it)
-
 		voluntary_switch = False
 		if (
 			prior_battle is not None
@@ -139,12 +138,11 @@ class ShowdownEnvironment(BaseShowdownEnv):
 			if prior_battle.active_pokemon.species != battle.active_pokemon.species:
 				if (np.sum(diff_faints_team) == 0) and (not prior_battle.active_pokemon.fainted):
 					voluntary_switch = True
-		# Save for state embedding (next step sees what we just did)
 
+		# Save for state embedding (next step sees what we just did)
 		self._last_voluntary_switch = 1.0 if voluntary_switch else 0.0
 
 		# Penalise switch spam and hazard entries
-
 		if voluntary_switch:
 			reward -= SWITCH_PENALTY
 			sc = battle.side_conditions  # our side
@@ -160,7 +158,6 @@ class ShowdownEnvironment(BaseShowdownEnv):
 				reward -= 0.005
 		else:
 			# tiny nudge for staying in when not forced
-
 			if (
 				prior_battle is not None
 				and prior_battle.active_pokemon is not None
@@ -171,8 +168,8 @@ class ShowdownEnvironment(BaseShowdownEnv):
 					and np.sum(diff_faints_team) == 0
 				):
 					reward += STAY_BONUS
-		# Small per-step nudge to end games sooner
 
+		# Small per-step nudge to end games sooner
 		reward += STEP_PENALTY
 
 		if battle.finished:
@@ -180,6 +177,7 @@ class ShowdownEnvironment(BaseShowdownEnv):
 				reward += WIN_BONUS
 			elif battle.lost:
 				reward -= LOSS_PENALTY
+
 		return float(np.clip(reward, -REWARD_CLIP, REWARD_CLIP))
 
 	def _observation_size(self) -> int:
@@ -193,13 +191,11 @@ class ShowdownEnvironment(BaseShowdownEnv):
 		to include in the observation from embed_battle.
 
 		Returns:
-				int: The size of the observation space.
+			int: The size of the observation space.
 		"""
-
 		# Simply change this number to the number
 		# of features you want to include in the observation from embed_battle.
 		# If you find a way to automate this, please let me know!
-
 		return 45
 
 	def embed_battle(self, battle: AbstractBattle) -> np.ndarray:
@@ -211,25 +207,24 @@ class ShowdownEnvironment(BaseShowdownEnv):
 		You need to implement this method to define how the battle state is represented.
 
 		Args:
-				battle (AbstractBattle): The current battle instance containing information about
-				the player's team and the opponent's team.
+			battle (AbstractBattle): The current battle instance containing information about
+			the player's team and the opponent's team.
 		Returns:
-				np.float32: A 1D numpy array containing the state you want the agent to observe.
+			np.float32: A 1D numpy array containing the state you want the agent to observe.
 		"""
-
 		health_team = [mon.current_hp_fraction for mon in battle.team.values()]
 		health_opponent = [mon.current_hp_fraction for mon in battle.opponent_team.values()]
+
 		if len(health_opponent) < len(health_team):
 			health_opponent.extend([1.0] * (len(health_team) - len(health_opponent)))
-		# faint counts
 
+		# faint counts
 		faints_team_count = float(sum(1 for mon in battle.team.values() if mon.fainted))
 		faints_opponent_count = float(
 			sum(1 for mon in battle.opponent_team.values() if mon.fainted)
 		)
 
 		# status one-hots for active mons
-
 		status_self = [0.0] * len(STATUSES)
 		status_opp = [0.0] * len(STATUSES)
 		if battle.active_pokemon is not None:
@@ -238,8 +233,8 @@ class ShowdownEnvironment(BaseShowdownEnv):
 		if getattr(battle, "opponent_active_pokemon", None) is not None:
 			for i, s in enumerate(STATUSES):
 				status_opp[i] = 1.0 if battle.opponent_active_pokemon.status == s else 0.0
-		# boosts for active mons (normalised by 6)
 
+		# boosts for active mons (normalised by 6)
 		boosts_self = [0.0] * len(BOOSTS)
 		boosts_opp = [0.0] * len(BOOSTS)
 		if battle.active_pokemon is not None:
@@ -248,8 +243,8 @@ class ShowdownEnvironment(BaseShowdownEnv):
 		if getattr(battle, "opponent_active_pokemon", None) is not None:
 			for i, k in enumerate(BOOSTS):
 				boosts_opp[i] = float(battle.opponent_active_pokemon.boosts.get(k, 0)) / 6.0
-		# hazards on each side
 
+		# hazards on each side
 		sc_self = battle.side_conditions
 		sc_opp = battle.opponent_side_conditions
 
@@ -267,7 +262,6 @@ class ShowdownEnvironment(BaseShowdownEnv):
 		]
 
 		# a few scalars that help policy
-
 		last_voluntary_switch = float(getattr(self, "_last_voluntary_switch", 0.0))
 		available_switches_norm = float(len(getattr(battle, "available_switches", []))) / 5.0
 		turn_norm = float(min(getattr(battle, "turn", 0), 100)) / 100.0
@@ -310,11 +304,12 @@ class SingleShowdownWrapper(SingleAgentWrapper):
 	Do NOT edit this class!
 
 	Attributes:
-			battle_format (str): The format of the Pokémon battle (e.g., "gen9randombattle").
-			opponent_type (str): The type of opponent player to use ("simple", "max", "random").
-			evaluation (bool): Whether the environment is in evaluation mode.
+		battle_format (str): The format of the Pokémon battle (e.g., "gen9randombattle").
+		opponent_type (str): The type of opponent player to use ("simple", "max", "random").
+		evaluation (bool): Whether the environment is in evaluation mode.
+
 	Raises:
-			ValueError: If an unknown opponent type is provided.
+		ValueError: If an unknown opponent type is provided.
 	"""
 
 	def __init__(
@@ -338,6 +333,7 @@ class SingleShowdownWrapper(SingleAgentWrapper):
 			opponent = RandomPlayer(account_configuration=opponent_configuration)
 		else:
 			raise ValueError(f"Unknown opponent type: {opponent_type}")
+
 		account_name_one: str = "t1" if not evaluation else "e1"
 		account_name_two: str = "t2" if not evaluation else "e2"
 
@@ -368,6 +364,8 @@ class SingleShowdownWrapper(SingleAgentWrapper):
 					os.path.join(bot_teams_folders, team_file), "r", encoding="utf-8"
 				) as file:
 					bot_teams[team_file[:-4]] = file.read()
+
 		if team_type in bot_teams:
 			return bot_teams[team_type]
+
 		return None
