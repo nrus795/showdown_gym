@@ -28,6 +28,12 @@ SWITCH_PENALTY = 0.02
 HAZARD_SWITCH_PENALTY = 0.02
 STAY_BONUS = 0.005
 
+_RECENT_SWITCH_EXTRA = 0.05
+_ATTACK_READY_EXTRA = 0.04
+_SWITCH_COOLDOWN_TURNS = 2
+_DECENT_BP = 70
+_MAX_BP_NORM = 150.0
+
 
 class ShowdownEnvironment(BaseShowdownEnv):
 	def __init__(
@@ -43,6 +49,8 @@ class ShowdownEnvironment(BaseShowdownEnv):
 			account_name_two=account_name_two,
 			team=team,
 		)
+		self._turns_since_switch = 10
+		self._last_voluntary_switch = 0.0
 
 	def get_additional_info(self) -> dict[str, dict[str, Any]]:
 		info = super().get_additional_info()
@@ -142,20 +150,36 @@ class ShowdownEnvironment(BaseShowdownEnv):
 		# Save for state embedding (next step sees what we just did)
 		self._last_voluntary_switch = 1.0 if voluntary_switch else 0.0
 
+		best_attack_bp = 0.0
+		if getattr(battle, "available_moves", None):
+			for m in battle.available_moves:
+				bp = float(getattr(m, "base_power", 0) or 0)
+				if bp > best_attack_bp:
+					best_attack_bp = bp
+		had_decent_attack = best_attack_bp >= _DECENT_BP
+
 		# Penalise switch spam and hazard entries
 		if voluntary_switch:
-			reward -= SWITCH_PENALTY
+			pen = SWITCH_PENALTY
+			if had_decent_attack:
+				pen += _ATTACK_READY_EXTRA
+			if self._turns_since_switch <= _SWITCH_COOLDOWN_TURNS:
+				pen += _RECENT_SWITCH_EXTRA
+
 			sc = battle.side_conditions  # our side
 			if SideCondition.STEALTH_ROCK in sc:
-				reward -= HAZARD_SWITCH_PENALTY
+				pen += HAZARD_SWITCH_PENALTY
 			spikes_layers = sc.get(SideCondition.SPIKES, 0)
 			if spikes_layers:
-				reward -= 0.01 * float(spikes_layers)
+				pen += 0.01 * float(spikes_layers)
 			tox_layers = sc.get(SideCondition.TOXIC_SPIKES, 0)
 			if tox_layers:
-				reward -= 0.01 * float(tox_layers)
+				pen += 0.01 * float(tox_layers)
 			if SideCondition.STICKY_WEB in sc:
-				reward -= 0.005
+				pen += 0.005
+
+			reward -= pen
+			self._turns_since_switch = 0
 		else:
 			# tiny nudge for staying in when not forced
 			if (
@@ -168,6 +192,7 @@ class ShowdownEnvironment(BaseShowdownEnv):
 					and np.sum(diff_faints_team) == 0
 				):
 					reward += STAY_BONUS
+			self._turns_since_switch = min(self._turns_since_switch + 1, 10)
 
 		# Small per-step nudge to end games sooner
 		reward += STEP_PENALTY
@@ -196,7 +221,7 @@ class ShowdownEnvironment(BaseShowdownEnv):
 		# Simply change this number to the number
 		# of features you want to include in the observation from embed_battle.
 		# If you find a way to automate this, please let me know!
-		return 45
+		return 47
 
 	def embed_battle(self, battle: AbstractBattle) -> np.ndarray:
 		"""
@@ -266,6 +291,16 @@ class ShowdownEnvironment(BaseShowdownEnv):
 		available_switches_norm = float(len(getattr(battle, "available_switches", []))) / 5.0
 		turn_norm = float(min(getattr(battle, "turn", 0), 100)) / 100.0
 
+		best_attack_bp = 0.0
+		if getattr(battle, "available_moves", None):
+			for m in battle.available_moves:
+				bp = float(getattr(m, "base_power", 0) or 0)
+				if bp > best_attack_bp:
+					best_attack_bp = bp
+
+		turns_since_switch_norm = float(min(getattr(self, "_turns_since_switch", 10), 10)) / 10.0
+		best_bp_norm = float(min(best_attack_bp, _MAX_BP_NORM)) / _MAX_BP_NORM
+
 		final_vector = np.concatenate(
 			[
 				np.array(health_team, dtype=np.float32),  # 6
@@ -281,6 +316,7 @@ class ShowdownEnvironment(BaseShowdownEnv):
 					[last_voluntary_switch, available_switches_norm, turn_norm],
 					dtype=np.float32,
 				),  # 3
+				np.array([turns_since_switch_norm, best_bp_norm], dtype=np.float32),
 			]
 		)
 
