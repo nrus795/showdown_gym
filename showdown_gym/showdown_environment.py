@@ -11,6 +11,7 @@ from poke_env import (
 )
 from poke_env.battle import AbstractBattle
 from poke_env.battle.side_condition import SideCondition
+from poke_env.data import GenData, to_id_str  # <-- added
 from poke_env.environment.single_agent_wrapper import SingleAgentWrapper
 from poke_env.player.player import Player
 
@@ -36,6 +37,15 @@ _SWITCH_COOLDOWN_TURNS = 2
 _DECENT_BP = 70
 _MAX_BP_NORM = 150.0
 
+# --- Smart attack/switch shaping (added; magnitudes are small relative to main terms) ---
+TYPE_HIT_BONUS = 0.03
+INEFFECTIVE_PENALTY = 0.02
+THREAT_SWITCH_BONUS = 0.05
+WASTED_STATUS_PENALTY = 0.02
+SE_THRESHOLD = 2.0
+NO_PROGRESS_EPS = 1e-4
+# ---------------------------------------------------------------------------------------
+
 
 class ShowdownEnvironment(BaseShowdownEnv):
 	def __init__(
@@ -53,6 +63,7 @@ class ShowdownEnvironment(BaseShowdownEnv):
 		)
 		self._turns_since_switch = 10
 		self._last_voluntary_switch = 0.0
+		self._type_chart = GenData.from_format(battle_format).type_chart  # <-- added
 
 	def get_additional_info(self) -> dict[str, dict[str, Any]]:
 		info = super().get_additional_info()
@@ -66,6 +77,63 @@ class ShowdownEnvironment(BaseShowdownEnv):
 			info[agent]["turns"] = self.battle1.turn
 
 		return info
+
+	# ------------------------ helpers for type-aware shaping (added) ------------------------
+
+	def _to_id(self, x) -> str:
+		s = getattr(x, "name", x)
+		return to_id_str(str(s)) if s is not None else ""
+
+	def _types_of(self, mon) -> tuple[str, ...]:
+		if mon is None:
+			return tuple()
+		ts = getattr(mon, "types", ()) or ()
+		return tuple(self._to_id(t) for t in ts if t is not None)
+
+	def _type_multiplier(self, atk_type: Any, defender_types: tuple[str, ...]) -> float:
+		atk = self._to_id(atk_type)
+		if not atk or not defender_types:
+			return 1.0
+		m = 1.0
+		row = self._type_chart.get(atk, {})
+		for dt in defender_types:
+			m *= row.get(dt, 1.0)
+		return float(m)
+
+	def _best_offense_multiplier(self, prior_battle: AbstractBattle | None) -> float:
+		if prior_battle is None or not getattr(prior_battle, "available_moves", None):
+			return 1.0
+		opp = getattr(prior_battle, "opponent_active_pokemon", None)
+		opp_types = self._types_of(opp)
+		best = 1.0
+		for mv in prior_battle.available_moves:
+			try:
+				mul_ = self._type_multiplier(getattr(mv, "type", None), opp_types)
+			except Exception:
+				mul_ = 1.0
+			if mul_ > best:
+				best = mul_
+		return best
+
+	def _threat_from_opp(self, prior_battle: AbstractBattle | None) -> float:
+		if prior_battle is None:
+			return 1.0
+		me = getattr(prior_battle, "active_pokemon", None)
+		opp = getattr(prior_battle, "opponent_active_pokemon", None)
+		my_types = self._types_of(me)
+		opp_types = self._types_of(opp)
+		if not my_types or not opp_types:
+			return 1.0
+		threat = 1.0
+		for ot in opp_types:
+			row = self._type_chart.get(ot, {})
+			m = 1.0
+			for mt in my_types:
+				m *= row.get(mt, 1.0)
+			threat = max(threat, m)
+		return float(threat)
+
+	# ---------------------------------------------------------------------------------------
 
 	def calc_reward(self, battle: AbstractBattle) -> float:
 		"""
@@ -204,6 +272,48 @@ class ShowdownEnvironment(BaseShowdownEnv):
 				reward += WIN_BONUS
 			elif battle.lost:
 				reward -= LOSS_PENALTY
+
+		# ---------- Smart attack / switch / status shaping (added) ----------
+		best_effectiveness_vs_opponent_prev = self._best_offense_multiplier(prior_battle)
+		opponent_threat_prev = self._threat_from_opp(prior_battle)
+
+		# use the existing per-mon diffs directly (no aggregation)
+		did_damage = bool((diff_health_opponent > NO_PROGRESS_EPS).any())
+
+		if voluntary_switch and opponent_threat_prev >= SE_THRESHOLD:
+			reward += THREAT_SWITCH_BONUS * (1.0 if opponent_threat_prev < 4.0 else 1.5)
+
+		if did_damage and best_effectiveness_vs_opponent_prev >= SE_THRESHOLD:
+			reward += TYPE_HIT_BONUS * (1.0 if best_effectiveness_vs_opponent_prev < 4.0 else 1.5)
+
+		if (not voluntary_switch) and opponent_threat_prev >= SE_THRESHOLD and not did_damage:
+			reward -= INEFFECTIVE_PENALTY
+
+		opponent_status_now = getattr(
+			getattr(battle, "opponent_active_pokemon", None), "status", None
+		)
+		opponent_status_prev = (
+			getattr(getattr(prior_battle, "opponent_active_pokemon", None), "status", None)
+			if prior_battle is not None
+			else None
+		)
+
+		team_boosts_now = dict(getattr(getattr(battle, "active_pokemon", None), "boosts", {}) or {})
+		team_boosts_prev = (
+			dict(getattr(getattr(prior_battle, "active_pokemon", None), "boosts", {}) or {})
+			if prior_battle is not None
+			else {}
+		)
+
+		boost_gained = any(
+			(team_boosts_now.get(k, 0) > team_boosts_prev.get(k, 0)) for k in team_boosts_now.keys()
+		)
+
+		no_status_change = opponent_status_now == opponent_status_prev
+		no_progress = (not did_damage) and (not boost_gained)
+		if no_status_change and no_progress:
+			reward -= WASTED_STATUS_PENALTY
+		# ---------- end shaping (added) ----------
 
 		reward = float(np.clip(reward, -REWARD_CLIP, REWARD_CLIP))
 		SCALING = int(round(1 / REWARD_QUANTUM))
