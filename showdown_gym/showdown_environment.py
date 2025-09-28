@@ -89,6 +89,7 @@ class ShowdownEnvironment(BaseShowdownEnv):
 			info[agent]["elo_agent"] = round(self._elo_agent_rating, 1)
 			info[agent]["elo_opponent"] = round(self._elo_opponent_rating, 1)
 
+		# (belt-and-suspenders) ensure Elo is applied if logger reads after finish
 		b = self.battle1
 		if b is not None and getattr(b, "finished", False):
 			if (
@@ -196,13 +197,9 @@ class ShowdownEnvironment(BaseShowdownEnv):
 			self._last_battle_tag = curr_tag
 			self._elo_updated_this_battle = False
 
-		reward = 0.0
-
+		# --- compute diffs ONCE (used by fallback and by shaping signals) ---
 		health_team = [mon.current_hp_fraction for mon in battle.team.values()]
 		health_opponent = [mon.current_hp_fraction for mon in battle.opponent_team.values()]
-
-		# If the opponent has less than 6 Pokémon,
-		# fill the missing values with 1.0 (fraction of health)
 		if len(health_opponent) < len(health_team):
 			health_opponent.extend([1.0] * (len(health_team) - len(health_opponent)))
 
@@ -213,12 +210,8 @@ class ShowdownEnvironment(BaseShowdownEnv):
 				mon.current_hp_fraction for mon in prior_battle.opponent_team.values()
 			]
 			prior_health_team = [mon.current_hp_fraction for mon in prior_battle.team.values()]
-
-		# Ensure prior_health_opponent has 6 components, filling missing values with 1.0
 		if len(prior_health_opponent) < len(health_team):
 			prior_health_opponent.extend([1.0] * (len(health_team) - len(prior_health_opponent)))
-
-		# If no prior state yet, use current so diffs are zero on the first step
 		if prior_battle is None:
 			prior_health_team = health_team.copy()
 			prior_health_opponent = health_opponent.copy()
@@ -226,13 +219,8 @@ class ShowdownEnvironment(BaseShowdownEnv):
 		diff_health_opponent = np.array(prior_health_opponent) - np.array(health_opponent)
 		diff_health_team = np.array(prior_health_team) - np.array(health_team)
 
-		# Reward for reducing the opponent's health; penalty for our health loss
-		reward += np.sum(diff_health_opponent) * 1.0
-		reward -= np.sum(diff_health_team) * 1.0
-
 		faints_team = [sum(1 for mon in battle.team.values() if mon.fainted)]
 		faints_opponent = [sum(1 for mon in battle.opponent_team.values() if mon.fainted)]
-
 		prior_faints_opponent = []
 		prior_faints_team = []
 		if prior_battle is not None:
@@ -240,17 +228,39 @@ class ShowdownEnvironment(BaseShowdownEnv):
 				sum(1 for mon in prior_battle.opponent_team.values() if mon.fainted)
 			]
 			prior_faints_team = [sum(1 for mon in prior_battle.team.values() if mon.fainted)]
-
 		if prior_battle is None:
 			prior_faints_opponent = faints_opponent.copy()
 			prior_faints_team = faints_team.copy()
 
 		diff_faints_opponent = np.array(prior_faints_opponent) - np.array(faints_opponent)
 		diff_faints_team = np.array(prior_faints_team) - np.array(faints_team)
+		# --------------------------------------------------------------------
 
-		# Make KOs matter more (opponent KO gained -> positive; our KO suffered -> negative)
-		reward += (-np.sum(diff_faints_opponent)) * KO_WEIGHT
-		reward -= (-np.sum(diff_faints_team)) * KO_WEIGHT
+		# --- base reward: prefer poke-env helper; fallback to manual diffs ---
+		if hasattr(self, "reward_computing_helper"):
+			base = float(
+				self.reward_computing_helper(
+					battle,
+					fainted_value=KO_WEIGHT,
+					hp_value=1.0,
+					victory_value=WIN_BONUS,
+				)
+			)
+		else:
+			base = (
+				np.sum(diff_health_opponent)
+				- np.sum(diff_health_team)
+				+ (-np.sum(diff_faints_opponent)) * KO_WEIGHT
+				- (-np.sum(diff_faints_team)) * KO_WEIGHT
+			)
+			if battle.finished:
+				if battle.won:
+					base += WIN_BONUS
+				elif battle.lost:
+					base -= LOSS_PENALTY
+
+		reward = float(base)
+		# --------------------------------------------------------------------
 
 		# Detect a voluntary switch (active changed, we didn't faint to force it)
 		voluntary_switch = False
@@ -314,7 +324,6 @@ class ShowdownEnvironment(BaseShowdownEnv):
 		best_effectiveness_vs_opponent_prev = self._best_offense_multiplier(prior_battle)
 		opponent_threat_prev = self._threat_from_opp(prior_battle)
 
-		# use the existing per-mon diffs directly (no aggregation)
 		did_damage = bool((diff_health_opponent > NO_PROGRESS_EPS).any())
 
 		if voluntary_switch and opponent_threat_prev >= SE_THRESHOLD:
@@ -355,16 +364,10 @@ class ShowdownEnvironment(BaseShowdownEnv):
 		# Small per-step nudge to end games sooner
 		reward += STEP_PENALTY
 
-		if battle.finished:
-			if battle.won:
-				reward += WIN_BONUS
-			elif battle.lost:
-				reward -= LOSS_PENALTY
-
-			# Elo: update once per finished battle
-			if not self._elo_updated_this_battle:
-				self._elo_update_once(battle)
-				self._elo_updated_this_battle = True
+		# Elo: update once per finished battle (no extra win/loss to reward here!)
+		if battle.finished and not self._elo_updated_this_battle:
+			self._elo_update_once(battle)
+			self._elo_updated_this_battle = True
 
 		reward = float(np.clip(reward, -REWARD_CLIP, REWARD_CLIP))
 		return reward
