@@ -1,6 +1,6 @@
 import os
 import time
-from typing import Any, Dict
+from typing import Any
 
 import numpy as np
 from poke_env import (
@@ -13,10 +13,12 @@ from poke_env.battle import AbstractBattle
 from poke_env.battle.side_condition import SideCondition
 from poke_env.data import GenData, to_id_str
 from poke_env.environment.single_agent_wrapper import SingleAgentWrapper
-from poke_env.environment.singles_env import ObsType
+
+# from poke_env.environment.singles_env import ObsType
 from poke_env.player.player import Player
 
 from showdown_gym.base_environment import BaseShowdownEnv
+
 STATUSES = ("BRN", "PAR", "PSN", "SLP", "FRZ")
 BOOSTS = ("atk", "def", "spa", "spd", "spe")
 
@@ -47,13 +49,11 @@ NO_PROGRESS_EPS = 1e-4
 # --- Simple Elo tracking (internal, not PS ladder) ---
 ELO_K = 32.0
 ELO_AGENT_INIT = 1000.0
-ELO_OPP_INIT = (
-    1200.0  # if using RandomPlayer, set this to 1000.0; SimpleHeuristics ~1100.0
-)
+ELO_OPP_INIT = 1200.0  # if using RandomPlayer, set this to 1000.0; SimpleHeuristics ~1100.0
 # -----------------------------------------------------
 
-class ShowdownEnvironment(BaseShowdownEnv):
 
+class ShowdownEnvironment(BaseShowdownEnv):
 	def __init__(
 		self,
 		battle_format: str = "gen9randombattle",
@@ -68,14 +68,14 @@ class ShowdownEnvironment(BaseShowdownEnv):
 			team=team,
 		)
 		self._turns_since_switch = 10
-        self._last_voluntary_switch = 0.0
-        self._type_chart = GenData.from_format(battle_format).type_chart
+		self._last_voluntary_switch = 0.0
+		self._type_chart = GenData.from_format(battle_format).type_chart
 
-        # Elo state
-        self._elo_agent_rating = float(ELO_AGENT_INIT)
-        self._elo_opponent_rating = float(ELO_OPP_INIT)
-        self._elo_updated_this_battle = False
-        self._last_battle_tag = None
+		# Elo state
+		self._elo_agent_rating = float(ELO_AGENT_INIT)
+		self._elo_opponent_rating = float(ELO_OPP_INIT)
+		self._elo_updated_this_battle = False
+		self._last_battle_tag = None
 		self.rl_agent = account_name_one
 
 	def _to_id(self, x) -> str:
@@ -150,14 +150,15 @@ class ShowdownEnvironment(BaseShowdownEnv):
 		self._elo_agent_rating = ra + ELO_K * (score - ea)
 		self._elo_opponent_rating = rb + ELO_K * ((1.0 - score) - (1.0 - ea))
 
-
 	def _get_action_size(self) -> int | None:
 		"""
 		None just uses the default number of actions as laid out in process_action - 26 actions.
 
-		This defines the size of the action space for the agent - e.g. the output of the RL agent.
+		This defines the size of the action space
+		for the agent - e.g. the output of the RL agent.
 
-		This should return the number of actions you wish to use if not using the default action scheme.
+		This should return the number of actions you
+		wish to use if not using the default action scheme.
 		"""
 		return None  # Return None if action size is default
 
@@ -183,29 +184,30 @@ class ShowdownEnvironment(BaseShowdownEnv):
 		"""
 		return action
 
-	def get_additional_info(self) -> Dict[str, Dict[str, Any]]:
+	def get_additional_info(self) -> dict[str, dict[str, Any]]:
 		info = super().get_additional_info()
 
-		# Add any additional information you want to include in the info dictionary that is saved in logs
+		# Add any additional information you want to include
+		# in the info dictionary that is saved in logs
 		# For example, you can add the win status
 
 		if self.battle1 is not None:
 			agent = self.possible_agents[0]
 			info[agent]["win"] = self.battle1.won
 			info[agent]["turns"] = self.battle1.turn
-            # expose internal Elo for logging
-            info[agent]["elo_agent"] = round(self._elo_agent_rating, 1)
-            info[agent]["elo_opponent"] = round(self._elo_opponent_rating, 1)
+			# expose internal Elo for logging
+			info[agent]["elo_agent"] = round(self._elo_agent_rating, 1)
+			info[agent]["elo_opponent"] = round(self._elo_opponent_rating, 1)
 
 		# (belt-and-suspenders) ensure Elo is applied if logger reads after finish
-        b = self.battle1
-        if b is not None and getattr(b, "finished", False):
-            if (
-                getattr(b, "battle_tag", None) == self._last_battle_tag
-                and not self._elo_updated_this_battle
-            ):
-                self._elo_update_once(b)
-                self._elo_updated_this_battle = True
+		b = self.battle1
+		if b is not None and getattr(b, "finished", False):
+			if (
+				getattr(b, "battle_tag", None) == self._last_battle_tag
+				and not self._elo_updated_this_battle
+			):
+				self._elo_update_once(b)
+				self._elo_updated_this_battle = True
 
 		return info
 
@@ -225,231 +227,203 @@ class ShowdownEnvironment(BaseShowdownEnv):
 
 		prior_battle = self._get_prior_battle(battle)
 
-        # New battle starting (first step): allow Elo to update at the end
-        curr_tag = getattr(battle, "battle_tag", None)
-        if curr_tag != self._last_battle_tag:
-            self._last_battle_tag = curr_tag
-            self._elo_updated_this_battle = False
+		# New battle starting (first step): allow Elo to update at the end
+		curr_tag = getattr(battle, "battle_tag", None)
+		if curr_tag != self._last_battle_tag:
+			self._last_battle_tag = curr_tag
+			self._elo_updated_this_battle = False
 
-        # --- compute diffs ONCE (used by fallback and by shaping signals) ---
-        health_team = [mon.current_hp_fraction for mon in battle.team.values()]
-        health_opponent = [
-            mon.current_hp_fraction for mon in battle.opponent_team.values()
-        ]
-        if len(health_opponent) < len(health_team):
-            health_opponent.extend([1.0] * (len(health_team) - len(health_opponent)))
+		# --- compute diffs ONCE (used by fallback and by shaping signals) ---
+		health_team = [mon.current_hp_fraction for mon in battle.team.values()]
+		health_opponent = [mon.current_hp_fraction for mon in battle.opponent_team.values()]
+		if len(health_opponent) < len(health_team):
+			health_opponent.extend([1.0] * (len(health_team) - len(health_opponent)))
 
-        prior_health_opponent = []
-        prior_health_team = []
-        if prior_battle is not None:
-            prior_health_opponent = [
-                mon.current_hp_fraction for mon in prior_battle.opponent_team.values()
-            ]
-            prior_health_team = [
-                mon.current_hp_fraction for mon in prior_battle.team.values()
-            ]
-        if len(prior_health_opponent) < len(health_team):
-            prior_health_opponent.extend(
-                [1.0] * (len(health_team) - len(prior_health_opponent))
-            )
-        if prior_battle is None:
-            prior_health_team = health_team.copy()
-            prior_health_opponent = health_opponent.copy()
+		prior_health_opponent = []
+		prior_health_team = []
+		if prior_battle is not None:
+			prior_health_opponent = [
+				mon.current_hp_fraction for mon in prior_battle.opponent_team.values()
+			]
+			prior_health_team = [mon.current_hp_fraction for mon in prior_battle.team.values()]
+		if len(prior_health_opponent) < len(health_team):
+			prior_health_opponent.extend([1.0] * (len(health_team) - len(prior_health_opponent)))
+		if prior_battle is None:
+			prior_health_team = health_team.copy()
+			prior_health_opponent = health_opponent.copy()
 
-        diff_health_opponent = np.array(prior_health_opponent) - np.array(
-            health_opponent
-        )
-        diff_health_team = np.array(prior_health_team) - np.array(health_team)
+		diff_health_opponent = np.array(prior_health_opponent) - np.array(health_opponent)
+		diff_health_team = np.array(prior_health_team) - np.array(health_team)
 
-        faints_team = [sum(1 for mon in battle.team.values() if mon.fainted)]
-        faints_opponent = [
-            sum(1 for mon in battle.opponent_team.values() if mon.fainted)
-        ]
-        prior_faints_opponent = []
-        prior_faints_team = []
-        if prior_battle is not None:
-            prior_faints_opponent = [
-                sum(1 for mon in prior_battle.opponent_team.values() if mon.fainted)
-            ]
-            prior_faints_team = [
-                sum(1 for mon in prior_battle.team.values() if mon.fainted)
-            ]
-        if prior_battle is None:
-            prior_faints_opponent = faints_opponent.copy()
-            prior_faints_team = faints_team.copy()
+		faints_team = [sum(1 for mon in battle.team.values() if mon.fainted)]
+		faints_opponent = [sum(1 for mon in battle.opponent_team.values() if mon.fainted)]
+		prior_faints_opponent = []
+		prior_faints_team = []
+		if prior_battle is not None:
+			prior_faints_opponent = [
+				sum(1 for mon in prior_battle.opponent_team.values() if mon.fainted)
+			]
+			prior_faints_team = [sum(1 for mon in prior_battle.team.values() if mon.fainted)]
+		if prior_battle is None:
+			prior_faints_opponent = faints_opponent.copy()
+			prior_faints_team = faints_team.copy()
 
-        diff_faints_opponent = np.array(prior_faints_opponent) - np.array(
-            faints_opponent
-        )
-        diff_faints_team = np.array(prior_faints_team) - np.array(faints_team)
-        # --------------------------------------------------------------------
+		diff_faints_opponent = np.array(prior_faints_opponent) - np.array(faints_opponent)
+		diff_faints_team = np.array(prior_faints_team) - np.array(faints_team)
+		# --------------------------------------------------------------------
 
-        # --- base reward: prefer poke-env helper; fallback to manual diffs ---
-        if hasattr(self, "reward_computing_helper"):
-            base = float(
-                self.reward_computing_helper(
-                    battle,
-                    fainted_value=KO_WEIGHT,
-                    hp_value=1.0,
-                    victory_value=WIN_BONUS,
-                )
-            )
-        else:
-            base = (
-                np.sum(diff_health_opponent)
-                - np.sum(diff_health_team)
-                + (-np.sum(diff_faints_opponent)) * KO_WEIGHT
-                - (-np.sum(diff_faints_team)) * KO_WEIGHT
-            )
-            if battle.finished:
-                if battle.won:
-                    base += WIN_BONUS
-                elif battle.lost:
-                    base -= LOSS_PENALTY
+		# --- base reward: prefer poke-env helper; fallback to manual diffs ---
+		if hasattr(self, "reward_computing_helper"):
+			base = float(
+				self.reward_computing_helper(
+					battle,
+					fainted_value=KO_WEIGHT,
+					hp_value=1.0,
+					victory_value=WIN_BONUS,
+				)
+			)
+		else:
+			base = (
+				np.sum(diff_health_opponent)
+				- np.sum(diff_health_team)
+				+ (-np.sum(diff_faints_opponent)) * KO_WEIGHT
+				- (-np.sum(diff_faints_team)) * KO_WEIGHT
+			)
+			if battle.finished:
+				if battle.won:
+					base += WIN_BONUS
+				elif battle.lost:
+					base -= LOSS_PENALTY
 
-        reward = float(base)
-        # --------------------------------------------------------------------
+		reward = float(base)
+		# --------------------------------------------------------------------
 
-        # Detect a voluntary switch (active changed, we didn't faint to force it)
-        voluntary_switch = False
-        if (
-            prior_battle is not None
-            and prior_battle.active_pokemon is not None
-            and battle.active_pokemon is not None
-        ):
-            if prior_battle.active_pokemon.species != battle.active_pokemon.species:
-                if (np.sum(diff_faints_team) == 0) and (
-                    not prior_battle.active_pokemon.fainted
-                ):
-                    voluntary_switch = True
+		# Detect a voluntary switch (active changed, we didn't faint to force it)
+		voluntary_switch = False
+		if (
+			prior_battle is not None
+			and prior_battle.active_pokemon is not None
+			and battle.active_pokemon is not None
+		):
+			if prior_battle.active_pokemon.species != battle.active_pokemon.species:
+				if (np.sum(diff_faints_team) == 0) and (not prior_battle.active_pokemon.fainted):
+					voluntary_switch = True
 
-        # Save for state embedding (next step sees what we just did)
-        self._last_voluntary_switch = 1.0 if voluntary_switch else 0.0
+		# Save for state embedding (next step sees what we just did)
+		self._last_voluntary_switch = 1.0 if voluntary_switch else 0.0
 
-        best_attack_bp = 0.0
-        if getattr(battle, "available_moves", None):
-            for m in battle.available_moves:
-                bp = float(getattr(m, "base_power", 0) or 0)
-                if bp > best_attack_bp:
-                    best_attack_bp = bp
-        had_decent_attack = best_attack_bp >= _DECENT_BP
+		best_attack_bp = 0.0
+		if getattr(battle, "available_moves", None):
+			for m in battle.available_moves:
+				bp = float(getattr(m, "base_power", 0) or 0)
+				if bp > best_attack_bp:
+					best_attack_bp = bp
+		had_decent_attack = best_attack_bp >= _DECENT_BP
 
-        # Penalise switch spam and hazard entries
-        if voluntary_switch:
-            pen = SWITCH_PENALTY
-            if had_decent_attack:
-                pen += _ATTACK_READY_EXTRA
-            if self._turns_since_switch <= _SWITCH_COOLDOWN_TURNS:
-                pen += _RECENT_SWITCH_EXTRA
+		# Penalise switch spam and hazard entries
+		if voluntary_switch:
+			pen = SWITCH_PENALTY
+			if had_decent_attack:
+				pen += _ATTACK_READY_EXTRA
+			if self._turns_since_switch <= _SWITCH_COOLDOWN_TURNS:
+				pen += _RECENT_SWITCH_EXTRA
 
-            sc = battle.side_conditions  # our side
-            if SideCondition.STEALTH_ROCK in sc:
-                pen += HAZARD_SWITCH_PENALTY
-            spikes_layers = sc.get(SideCondition.SPIKES, 0)
-            if spikes_layers:
-                pen += 0.01 * float(spikes_layers)
-            tox_layers = sc.get(SideCondition.TOXIC_SPIKES, 0)
-            if tox_layers:
-                pen += 0.01 * float(tox_layers)
-            if SideCondition.STICKY_WEB in sc:
-                pen += 0.005
+			sc = battle.side_conditions  # our side
+			if SideCondition.STEALTH_ROCK in sc:
+				pen += HAZARD_SWITCH_PENALTY
+			spikes_layers = sc.get(SideCondition.SPIKES, 0)
+			if spikes_layers:
+				pen += 0.01 * float(spikes_layers)
+			tox_layers = sc.get(SideCondition.TOXIC_SPIKES, 0)
+			if tox_layers:
+				pen += 0.01 * float(tox_layers)
+			if SideCondition.STICKY_WEB in sc:
+				pen += 0.005
 
-            reward -= pen
-            self._turns_since_switch = 0
-        else:
-            # tiny nudge for staying in when not forced
-            if (
-                prior_battle is not None
-                and prior_battle.active_pokemon is not None
-                and battle.active_pokemon is not None
-            ):
-                if (
-                    prior_battle.active_pokemon.species == battle.active_pokemon.species
-                    and np.sum(diff_faints_team) == 0
-                ):
-                    reward += STAY_BONUS
-            self._turns_since_switch = min(self._turns_since_switch + 1, 10)
+			reward -= pen
+			self._turns_since_switch = 0
+		else:
+			# tiny nudge for staying in when not forced
+			if (
+				prior_battle is not None
+				and prior_battle.active_pokemon is not None
+				and battle.active_pokemon is not None
+			):
+				if (
+					prior_battle.active_pokemon.species == battle.active_pokemon.species
+					and np.sum(diff_faints_team) == 0
+				):
+					reward += STAY_BONUS
+			self._turns_since_switch = min(self._turns_since_switch + 1, 10)
 
-        # ---------- Smart attack / switch / status shaping ----------
-        best_effectiveness_vs_opponent_prev = self._best_offense_multiplier(
-            prior_battle
-        )
-        opponent_threat_prev = self._threat_from_opp(prior_battle)
+		# ---------- Smart attack / switch / status shaping ----------
+		best_effectiveness_vs_opponent_prev = self._best_offense_multiplier(prior_battle)
+		opponent_threat_prev = self._threat_from_opp(prior_battle)
 
-        did_damage = bool((diff_health_opponent > NO_PROGRESS_EPS).any())
+		did_damage = bool((diff_health_opponent > NO_PROGRESS_EPS).any())
 
-        if voluntary_switch and opponent_threat_prev >= SE_THRESHOLD:
-            reward += THREAT_SWITCH_BONUS * (1.0 if opponent_threat_prev < 4.0 else 1.5)
+		if voluntary_switch and opponent_threat_prev >= SE_THRESHOLD:
+			reward += THREAT_SWITCH_BONUS * (1.0 if opponent_threat_prev < 4.0 else 1.5)
 
-        if did_damage and best_effectiveness_vs_opponent_prev >= SE_THRESHOLD:
-            reward += TYPE_HIT_BONUS * (
-                1.0 if best_effectiveness_vs_opponent_prev < 4.0 else 1.5
-            )
+		if did_damage and best_effectiveness_vs_opponent_prev >= SE_THRESHOLD:
+			reward += TYPE_HIT_BONUS * (1.0 if best_effectiveness_vs_opponent_prev < 4.0 else 1.5)
 
-        if (
-            (not voluntary_switch)
-            and opponent_threat_prev >= SE_THRESHOLD
-            and not did_damage
-        ):
-            reward -= INEFFECTIVE_PENALTY
+		if (not voluntary_switch) and opponent_threat_prev >= SE_THRESHOLD and not did_damage:
+			reward -= INEFFECTIVE_PENALTY
 
-        opponent_status_now = getattr(
-            getattr(battle, "opponent_active_pokemon", None), "status", None
-        )
-        opponent_status_prev = (
-            getattr(
-                getattr(prior_battle, "opponent_active_pokemon", None), "status", None
-            )
-            if prior_battle is not None
-            else None
-        )
+		opponent_status_now = getattr(
+			getattr(battle, "opponent_active_pokemon", None), "status", None
+		)
+		opponent_status_prev = (
+			getattr(getattr(prior_battle, "opponent_active_pokemon", None), "status", None)
+			if prior_battle is not None
+			else None
+		)
 
-        team_boosts_now = dict(
-            getattr(getattr(battle, "active_pokemon", None), "boosts", {}) or {}
-        )
-        team_boosts_prev = (
-            dict(
-                getattr(getattr(prior_battle, "active_pokemon", None), "boosts", {})
-                or {}
-            )
-            if prior_battle is not None
-            else {}
-        )
+		team_boosts_now = dict(getattr(getattr(battle, "active_pokemon", None), "boosts", {}) or {})
+		team_boosts_prev = (
+			dict(getattr(getattr(prior_battle, "active_pokemon", None), "boosts", {}) or {})
+			if prior_battle is not None
+			else {}
+		)
 
-        boost_gained = any(
-            (team_boosts_now.get(k, 0) > team_boosts_prev.get(k, 0))
-            for k in team_boosts_now.keys()
-        )
+		boost_gained = any(
+			(team_boosts_now.get(k, 0) > team_boosts_prev.get(k, 0)) for k in team_boosts_now.keys()
+		)
 
-        no_status_change = opponent_status_now == opponent_status_prev
-        no_progress = (not did_damage) and (not boost_gained)
-        if no_status_change and no_progress:
-            reward -= WASTED_STATUS_PENALTY
-        # ---------- end shaping ----------
+		no_status_change = opponent_status_now == opponent_status_prev
+		no_progress = (not did_damage) and (not boost_gained)
+		if no_status_change and no_progress:
+			reward -= WASTED_STATUS_PENALTY
+		# ---------- end shaping ----------
 
-        # Small per-step nudge to end games sooner
-        reward += STEP_PENALTY
+		# Small per-step nudge to end games sooner
+		reward += STEP_PENALTY
 
-        # Elo: update once per finished battle (no extra win/loss to reward here!)
-        if battle.finished and not self._elo_updated_this_battle:
-            self._elo_update_once(battle)
-            self._elo_updated_this_battle = True
+		# Elo: update once per finished battle (no extra win/loss to reward here!)
+		if battle.finished and not self._elo_updated_this_battle:
+			self._elo_update_once(battle)
+			self._elo_updated_this_battle = True
 
-        reward = float(np.clip(reward, -REWARD_CLIP, REWARD_CLIP))
-        return reward
+		reward = float(np.clip(reward, -REWARD_CLIP, REWARD_CLIP))
+		return reward
 
 	def _observation_size(self) -> int:
 		"""
-		Returns the size of the observation size to create the observation space for all possible agents in the environment.
+		Returns the size of the observation size to create
+		the observation space for all possible agents in the environment.
 
-		You need to set obvervation size to the number of features you want to include in the observation.
-		Annoyingly, you need to set this manually based on the features you want to include in the observation from emded_battle.
+		You need to set observation size to the
+		number of features you want to include in the observation.
+		Annoyingly, you need to set this manually based
+		on the features you want to include in the observation from embed_battle.
 
 		Returns:
 			int: The size of the observation space.
 		"""
 
-		# Simply change this number to the number of features you want to include in the observation from embed_battle.
+		# Simply change this number to the number of
+		# features you want to include in the observation from embed_battle.
 		# If you find a way to automate this, please let me know!
 		return 47
 
@@ -469,101 +443,89 @@ class ShowdownEnvironment(BaseShowdownEnv):
 		"""
 
 		health_team = [mon.current_hp_fraction for mon in battle.team.values()]
-        health_opponent = [
-            mon.current_hp_fraction for mon in battle.opponent_team.values()
-        ]
+		health_opponent = [mon.current_hp_fraction for mon in battle.opponent_team.values()]
 
-        if len(health_opponent) < len(health_team):
-            health_opponent.extend([1.0] * (len(health_team) - len(health_opponent)))
+		if len(health_opponent) < len(health_team):
+			health_opponent.extend([1.0] * (len(health_team) - len(health_opponent)))
 
-        # faint counts
-        faints_team_count = float(sum(1 for mon in battle.team.values() if mon.fainted))
-        faints_opponent_count = float(
-            sum(1 for mon in battle.opponent_team.values() if mon.fainted)
-        )
+		# faint counts
+		faints_team_count = float(sum(1 for mon in battle.team.values() if mon.fainted))
+		faints_opponent_count = float(
+			sum(1 for mon in battle.opponent_team.values() if mon.fainted)
+		)
 
-        # status one-hots for active mons
-        status_self = [0.0] * len(STATUSES)
-        status_opp = [0.0] * len(STATUSES)
-        if battle.active_pokemon is not None:
-            for i, s in enumerate(STATUSES):
-                status_self[i] = 1.0 if battle.active_pokemon.status == s else 0.0
-        if getattr(battle, "opponent_active_pokemon", None) is not None:
-            for i, s in enumerate(STATUSES):
-                status_opp[i] = (
-                    1.0 if battle.opponent_active_pokemon.status == s else 0.0
-                )
+		# status one-hots for active mons
+		status_self = [0.0] * len(STATUSES)
+		status_opp = [0.0] * len(STATUSES)
+		if battle.active_pokemon is not None:
+			for i, s in enumerate(STATUSES):
+				status_self[i] = 1.0 if battle.active_pokemon.status == s else 0.0
+		if getattr(battle, "opponent_active_pokemon", None) is not None:
+			for i, s in enumerate(STATUSES):
+				status_opp[i] = 1.0 if battle.opponent_active_pokemon.status == s else 0.0
 
-        # boosts for active mons (normalised by 6)
-        boosts_self = [0.0] * len(BOOSTS)
-        boosts_opp = [0.0] * len(BOOSTS)
-        if battle.active_pokemon is not None:
-            for i, k in enumerate(BOOSTS):
-                boosts_self[i] = float(battle.active_pokemon.boosts.get(k, 0)) / 6.0
-        if getattr(battle, "opponent_active_pokemon", None) is not None:
-            for i, k in enumerate(BOOSTS):
-                boosts_opp[i] = (
-                    float(battle.opponent_active_pokemon.boosts.get(k, 0)) / 6.0
-                )
+		# boosts for active mons (normalised by 6)
+		boosts_self = [0.0] * len(BOOSTS)
+		boosts_opp = [0.0] * len(BOOSTS)
+		if battle.active_pokemon is not None:
+			for i, k in enumerate(BOOSTS):
+				boosts_self[i] = float(battle.active_pokemon.boosts.get(k, 0)) / 6.0
+		if getattr(battle, "opponent_active_pokemon", None) is not None:
+			for i, k in enumerate(BOOSTS):
+				boosts_opp[i] = float(battle.opponent_active_pokemon.boosts.get(k, 0)) / 6.0
 
-        # hazards on each side
-        sc_self = battle.side_conditions
-        sc_opp = battle.opponent_side_conditions
+		# hazards on each side
+		sc_self = battle.side_conditions
+		sc_opp = battle.opponent_side_conditions
 
-        hazards_self = [
-            1.0 if SideCondition.STEALTH_ROCK in sc_self else 0.0,
-            float(sc_self.get(SideCondition.SPIKES, 0)) / 3.0,
-            float(sc_self.get(SideCondition.TOXIC_SPIKES, 0)) / 2.0,
-            1.0 if SideCondition.STICKY_WEB in sc_self else 0.0,
-        ]
-        hazards_opp = [
-            1.0 if SideCondition.STEALTH_ROCK in sc_opp else 0.0,
-            float(sc_opp.get(SideCondition.SPIKES, 0)) / 3.0,
-            float(sc_opp.get(SideCondition.TOXIC_SPIKES, 0)) / 2.0,
-            1.0 if SideCondition.STICKY_WEB in sc_opp else 0.0,
-        ]
+		hazards_self = [
+			1.0 if SideCondition.STEALTH_ROCK in sc_self else 0.0,
+			float(sc_self.get(SideCondition.SPIKES, 0)) / 3.0,
+			float(sc_self.get(SideCondition.TOXIC_SPIKES, 0)) / 2.0,
+			1.0 if SideCondition.STICKY_WEB in sc_self else 0.0,
+		]
+		hazards_opp = [
+			1.0 if SideCondition.STEALTH_ROCK in sc_opp else 0.0,
+			float(sc_opp.get(SideCondition.SPIKES, 0)) / 3.0,
+			float(sc_opp.get(SideCondition.TOXIC_SPIKES, 0)) / 2.0,
+			1.0 if SideCondition.STICKY_WEB in sc_opp else 0.0,
+		]
 
-        # a few scalars that help policy
-        last_voluntary_switch = float(getattr(self, "_last_voluntary_switch", 0.0))
-        available_switches_norm = (
-            float(len(getattr(battle, "available_switches", []))) / 5.0
-        )
-        turn_norm = float(min(getattr(battle, "turn", 0), 100)) / 100.0
+		# a few scalars that help policy
+		last_voluntary_switch = float(getattr(self, "_last_voluntary_switch", 0.0))
+		available_switches_norm = float(len(getattr(battle, "available_switches", []))) / 5.0
+		turn_norm = float(min(getattr(battle, "turn", 0), 100)) / 100.0
 
-        best_attack_bp = 0.0
-        if getattr(battle, "available_moves", None):
-            for m in battle.available_moves:
-                bp = float(getattr(m, "base_power", 0) or 0)
-                if bp > best_attack_bp:
-                    best_attack_bp = bp
+		best_attack_bp = 0.0
+		if getattr(battle, "available_moves", None):
+			for m in battle.available_moves:
+				bp = float(getattr(m, "base_power", 0) or 0)
+				if bp > best_attack_bp:
+					best_attack_bp = bp
 
-        turns_since_switch_norm = (
-            float(min(getattr(self, "_turns_since_switch", 10), 10)) / 10.0
-        )
-        best_bp_norm = float(min(best_attack_bp, _MAX_BP_NORM)) / _MAX_BP_NORM
+		turns_since_switch_norm = float(min(getattr(self, "_turns_since_switch", 10), 10)) / 10.0
+		best_bp_norm = float(min(best_attack_bp, _MAX_BP_NORM)) / _MAX_BP_NORM
 
-        final_vector = np.concatenate(
-            [
-                np.array(health_team, dtype=np.float32),  # 6
-                np.array(health_opponent, dtype=np.float32),  # 6
-                np.array(
-                    [faints_team_count, faints_opponent_count], dtype=np.float32
-                ),  # 2
-                np.array(status_self, dtype=np.float32),  # 5
-                np.array(status_opp, dtype=np.float32),  # 5
-                np.array(boosts_self, dtype=np.float32),  # 5
-                np.array(boosts_opp, dtype=np.float32),  # 5
-                np.array(hazards_self, dtype=np.float32),  # 4
-                np.array(hazards_opp, dtype=np.float32),  # 4
-                np.array(
-                    [last_voluntary_switch, available_switches_norm, turn_norm],
-                    dtype=np.float32,
-                ),  # 3
-                np.array([turns_since_switch_norm, best_bp_norm], dtype=np.float32),
-            ]
-        )
+		final_vector = np.concatenate(
+			[
+				np.array(health_team, dtype=np.float32),  # 6
+				np.array(health_opponent, dtype=np.float32),  # 6
+				np.array([faints_team_count, faints_opponent_count], dtype=np.float32),  # 2
+				np.array(status_self, dtype=np.float32),  # 5
+				np.array(status_opp, dtype=np.float32),  # 5
+				np.array(boosts_self, dtype=np.float32),  # 5
+				np.array(boosts_opp, dtype=np.float32),  # 5
+				np.array(hazards_self, dtype=np.float32),  # 4
+				np.array(hazards_opp, dtype=np.float32),  # 4
+				np.array(
+					[last_voluntary_switch, available_switches_norm, turn_norm],
+					dtype=np.float32,
+				),  # 3
+				np.array([turns_since_switch_norm, best_bp_norm], dtype=np.float32),
+			]
+		)
 
-        return final_vector.astype(np.float32)
+		return final_vector.astype(np.float32)
 
 
 ########################################
@@ -604,9 +566,7 @@ class SingleShowdownWrapper(SingleAgentWrapper):
 
 		opponent_configuration = AccountConfiguration(opponent_account, None)
 		if opponent_type == "simple":
-			opponent = SimpleHeuristicsPlayer(
-				account_configuration=opponent_configuration
-			)
+			opponent = SimpleHeuristicsPlayer(account_configuration=opponent_configuration)
 		elif opponent_type == "max":
 			opponent = MaxBasePowerPlayer(account_configuration=opponent_configuration)
 		elif opponent_type == "random":
