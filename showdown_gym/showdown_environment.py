@@ -22,29 +22,41 @@ from showdown_gym.base_environment import BaseShowdownEnv
 STATUSES = ("BRN", "PAR", "PSN", "SLP", "FRZ")
 BOOSTS = ("atk", "def", "spa", "spd", "spe")
 
+# Main reward weights
 KO_WEIGHT = 3.0
 STATUS_WEIGHT = 0.5
 WIN_BONUS = 25.0
 LOSS_PENALTY = 25.0
-STEP_PENALTY = -0.01
 REWARD_CLIP = 50.0
+
+# Dense HP shaping (we take helper hp_value=0 and do it ourselves)
+HP_WEIGHT = 1.0  # reward += HP_WEIGHT * (opp_hp_loss - own_hp_loss)
+
+# Switch shaping
 SWITCH_PENALTY = 0.02
 HAZARD_SWITCH_PENALTY = 0.02
 STAY_BONUS = 0.005
-
 _RECENT_SWITCH_EXTRA = 0.05
 _ATTACK_READY_EXTRA = 0.04
 _SWITCH_COOLDOWN_TURNS = 2
+
+# Attack quality shaping
 _DECENT_BP = 70
 _MAX_BP_NORM = 150.0
 
-# --- Smart attack/switch shaping (small nudges, relative to main terms) ---
+# Tactical nudges
 TYPE_HIT_BONUS = 0.03
 INEFFECTIVE_PENALTY = 0.02
 THREAT_SWITCH_BONUS = 0.05
 SE_THRESHOLD = 2.0
 NO_PROGRESS_EPS = 1e-4
-# --------------------------------------------------------------------------
+
+# Anti-stall (soft)
+NO_PROGRESS_TURNS = 3
+NO_PROGRESS_PENALTY = 0.02
+
+# Hazard progress
+HAZARD_BONUS = 0.01  # per effective new hazard "unit" applied to opponent
 
 # --- Simple Elo tracking (internal, not PS ladder) ---
 ELO_K = 32.0
@@ -77,6 +89,10 @@ class ShowdownEnvironment(BaseShowdownEnv):
 		self._elo_updated_this_battle = False
 		self._last_battle_tag = None
 		self.rl_agent = account_name_one
+
+		# Learning aids
+		self._turns_since_progress = 0
+		self._illegal_action_count = 0
 
 	def _to_id(self, x) -> str:
 		s = getattr(x, "name", x)
@@ -162,6 +178,95 @@ class ShowdownEnvironment(BaseShowdownEnv):
 		"""
 		return None  # Return None if action size is default
 
+	# ------------------------ action helpers/masking ------------------------
+
+	def _legal_action_ids(self, battle: AbstractBattle) -> set[int]:
+		legal: set[int] = set()
+
+		moves = getattr(battle, "available_moves", []) or []
+		switches = getattr(battle, "available_switches", []) or []
+
+		# Base moves 6..9
+		for i in range(min(len(moves), 4)):
+			legal.add(6 + i)
+
+		# Mega 10..13
+		if bool(getattr(battle, "can_mega_evolve", False)):
+			for i in range(min(len(moves), 4)):
+				legal.add(10 + i)
+
+		# Z-moves 14..17 (only if Z is available and the move can be Z)
+		if bool(getattr(battle, "can_z_move", False)):
+			for i, mv in enumerate(moves[:4]):
+				is_z_ok = bool(getattr(mv, "is_z_move", False)) or bool(
+					getattr(mv, "can_z_move", False)
+				)
+				# If we can't detect per-move, allow but we'll fallback below if rejected.
+				if is_z_ok or True:
+					legal.add(14 + i)
+
+		# Dynamax 18..21
+		if bool(getattr(battle, "can_dynamax", False)):
+			for i in range(min(len(moves), 4)):
+				legal.add(18 + i)
+
+		# Terastallize 22..25
+		if bool(getattr(battle, "can_tera", False)) or bool(
+			getattr(battle, "can_terastallize", False)
+		):
+			for i in range(min(len(moves), 4)):
+				legal.add(22 + i)
+
+		# Switches 0..5
+		for i in range(min(len(switches), 6)):
+			legal.add(i)
+
+		# default (-2) and forfeit (-1)
+		legal.update({-2, -1})
+		return legal
+
+	def _best_move_index(self, battle: AbstractBattle) -> int | None:
+		moves = getattr(battle, "available_moves", []) or []
+		if not moves:
+			return None
+		opp = getattr(battle, "opponent_active_pokemon", None)
+		opp_types = self._types_of(opp)
+		best_idx = 0
+		best_score = -1.0
+		for i, mv in enumerate(moves[:4]):
+			bp = float(getattr(mv, "base_power", 0) or 0)
+			mul_ = self._type_multiplier(getattr(mv, "type", None), opp_types)
+			score = bp * max(mul_, 1.0)  # prefer SE, but don't punish NVE too hard
+			if score > best_score:
+				best_score = score
+				best_idx = i
+		return int(best_idx)
+
+	def _best_switch_index(self, battle: AbstractBattle) -> int | None:
+		switches = getattr(battle, "available_switches", []) or []
+		if not switches:
+			return None
+		opp = getattr(battle, "opponent_active_pokemon", None)
+		opp_types = self._types_of(opp)
+		best_i = 0
+		best_threat = float("inf")
+		for i, cand in enumerate(switches[:6]):
+			my_types = self._types_of(cand)
+			if not my_types or not opp_types:
+				threat = 1.0
+			else:
+				threat = 1.0
+				for ot in opp_types:
+					row = self._type_chart.get(ot, {})
+					m = 1.0
+					for mt in my_types:
+						m *= row.get(mt, 1.0)
+					threat = max(threat, m)
+			if threat < best_threat:
+				best_threat = threat
+				best_i = i
+		return int(best_i)
+
 	def process_action(self, action: np.int64) -> np.int64:
 		"""
 		Returns the np.int64 relative to the given action.
@@ -182,7 +287,35 @@ class ShowdownEnvironment(BaseShowdownEnv):
 		:return: The battle order ID for the given action in context of the current battle.
 		:rtype: np.Int64
 		"""
-		return action
+		b = self.battle1
+		if b is None:
+			return action
+
+		legal = self._legal_action_ids(b)
+		a = int(action)
+
+		if a in legal:
+			return np.int64(a)
+
+		# Illegal -> smart fallback
+		self._illegal_action_count += 1
+
+		# Prefer good move
+		m_idx = self._best_move_index(b)
+		if m_idx is not None:
+			base_move_id = 6 + m_idx
+			if base_move_id in legal:
+				return np.int64(base_move_id)
+
+		# Otherwise safest switch
+		s_idx = self._best_switch_index(b)
+		if s_idx is not None:
+			switch_id = s_idx  # 0..5
+			if switch_id in legal:
+				return np.int64(switch_id)
+
+		# Last resort default
+		return np.int64(-2)
 
 	def get_additional_info(self) -> dict[str, dict[str, Any]]:
 		info = super().get_additional_info()
@@ -198,6 +331,7 @@ class ShowdownEnvironment(BaseShowdownEnv):
 			# expose internal Elo for logging
 			info[agent]["elo_agent"] = round(self._elo_agent_rating, 1)
 			info[agent]["elo_opponent"] = round(self._elo_opponent_rating, 1)
+			info[agent]["illegal_actions"] = int(self._illegal_action_count)
 
 		# (belt-and-suspenders) ensure Elo is applied if logger reads after finish
 		b = self.battle1
@@ -210,6 +344,16 @@ class ShowdownEnvironment(BaseShowdownEnv):
 				self._elo_updated_this_battle = True
 
 		return info
+
+	def _hazard_score(self, sc: dict) -> float:
+		score = 0.0
+		if SideCondition.STEALTH_ROCK in sc:
+			score += 1.0
+		score += 0.5 * float(sc.get(SideCondition.SPIKES, 0))
+		score += 0.5 * float(sc.get(SideCondition.TOXIC_SPIKES, 0))
+		if SideCondition.STICKY_WEB in sc:
+			score += 1.0
+		return score
 
 	def calc_reward(self, battle: AbstractBattle) -> float:
 		"""
@@ -232,6 +376,8 @@ class ShowdownEnvironment(BaseShowdownEnv):
 		if curr_tag != self._last_battle_tag:
 			self._last_battle_tag = curr_tag
 			self._elo_updated_this_battle = False
+			self._turns_since_progress = 0
+			self._illegal_action_count = 0
 
 		# Minimal diffs we still use for shaping (switch detection and damage check)
 		health_team = [mon.current_hp_fraction for mon in battle.team.values()]
@@ -269,17 +415,22 @@ class ShowdownEnvironment(BaseShowdownEnv):
 
 		diff_faints_team = np.array(prior_faints_team) - np.array(faints_team)
 
-		# Base reward: rely entirely on poke-env helper (HP, KOs, status, victory)
+		# Base reward: rely on poke-env helper for KOs, status, victory (HP via our dense shaping)
 		base = float(
 			self.reward_computing_helper(
 				battle,
 				fainted_value=KO_WEIGHT,
-				hp_value=1.0,  # 1.0 ≈ 100% HP swing across one mon; tune down to 0.5 if too spiky
+				hp_value=0.0,  # we do HP shaping below
 				victory_value=WIN_BONUS,
 				status_value=STATUS_WEIGHT,
 			)
 		)
 		reward = float(base)
+
+		# Dense HP shaping (progress signal every turn)
+		opp_hp_loss = float(np.sum(diff_health_opponent))
+		own_hp_loss = float(np.sum(diff_health_team))
+		reward += HP_WEIGHT * (opp_hp_loss - own_hp_loss)
 
 		# Detect voluntary switch (not from faint)
 		voluntary_switch = False
@@ -334,6 +485,17 @@ class ShowdownEnvironment(BaseShowdownEnv):
 					reward += STAY_BONUS
 			self._turns_since_switch = min(self._turns_since_switch + 1, 10)
 
+		# Hazard progress (reward when we add hazards on opponent side)
+		# sc_self = battle.side_conditions
+		sc_opp = battle.opponent_side_conditions
+		if prior_battle is not None:
+			prior_sc_opp = prior_battle.opponent_side_conditions
+		else:
+			prior_sc_opp = sc_opp
+		hazard_delta = self._hazard_score(sc_opp) - self._hazard_score(prior_sc_opp)
+		if hazard_delta > 0:
+			reward += HAZARD_BONUS * float(hazard_delta)
+
 		# Small nudges for tactical quality
 		best_effectiveness_vs_opponent_prev = self._best_offense_multiplier(prior_battle)
 		opponent_threat_prev = self._threat_from_opp(prior_battle)
@@ -348,8 +510,20 @@ class ShowdownEnvironment(BaseShowdownEnv):
 		if (not voluntary_switch) and opponent_threat_prev >= SE_THRESHOLD and not did_damage:
 			reward -= INEFFECTIVE_PENALTY
 
-		# No per-step penalty by default (prevents negative drift)
-		# reward += STEP_PENALTY
+		# Anti-stall if we made no progress (no damage, no faints on either side)
+		made_progress = did_damage or bool((diff_health_team > NO_PROGRESS_EPS).any())
+		made_progress = made_progress or (
+			int(np.sum(prior_faints_opponent)) != int(np.sum(faints_opponent))
+		)
+		made_progress = made_progress or (
+			int(np.sum(prior_faints_team)) != int(np.sum(faints_team))
+		)
+		if made_progress:
+			self._turns_since_progress = 0
+		else:
+			self._turns_since_progress += 1
+			if self._turns_since_progress >= NO_PROGRESS_TURNS:
+				reward -= NO_PROGRESS_PENALTY
 
 		# Elo update (not part of reward)
 		if battle.finished and not self._elo_updated_this_battle:
@@ -373,10 +547,8 @@ class ShowdownEnvironment(BaseShowdownEnv):
 			int: The size of the observation space.
 		"""
 
-		# Simply change this number to the number of
-		# features you want to include in the observation from embed_battle.
-		# If you find a way to automate this, please let me know!
-		return 47
+		# 47 original + 2 tactical scalars (best offense multiplier, opp threat) = 49
+		return 49
 
 	def embed_battle(self, battle: AbstractBattle) -> np.ndarray:
 		"""
@@ -457,6 +629,10 @@ class ShowdownEnvironment(BaseShowdownEnv):
 		turns_since_switch_norm = float(min(getattr(self, "_turns_since_switch", 10), 10)) / 10.0
 		best_bp_norm = float(min(best_attack_bp, _MAX_BP_NORM)) / _MAX_BP_NORM
 
+		# NEW: tactical scalars
+		best_effectiveness_vs_opponent_curr = self._best_offense_multiplier(battle)
+		opponent_threat_curr = self._threat_from_opp(battle)
+
 		final_vector = np.concatenate(
 			[
 				np.array(health_team, dtype=np.float32),  # 6
@@ -472,7 +648,10 @@ class ShowdownEnvironment(BaseShowdownEnv):
 					[last_voluntary_switch, available_switches_norm, turn_norm],
 					dtype=np.float32,
 				),  # 3
-				np.array([turns_since_switch_norm, best_bp_norm], dtype=np.float32),
+				np.array([turns_since_switch_norm, best_bp_norm], dtype=np.float32),  # 2
+				np.array(
+					[best_effectiveness_vs_opponent_curr, opponent_threat_curr], dtype=np.float32
+				),  # 2 (new)
 			]
 		)
 
