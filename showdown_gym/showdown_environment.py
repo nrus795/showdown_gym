@@ -23,6 +23,7 @@ STATUSES = ("BRN", "PAR", "PSN", "SLP", "FRZ")
 BOOSTS = ("atk", "def", "spa", "spd", "spe")
 
 KO_WEIGHT = 3.0
+STATUS_WEIGHT = 0.5
 WIN_BONUS = 25.0
 LOSS_PENALTY = 25.0
 STEP_PENALTY = -0.01
@@ -41,7 +42,6 @@ _MAX_BP_NORM = 150.0
 TYPE_HIT_BONUS = 0.03
 INEFFECTIVE_PENALTY = 0.02
 THREAT_SWITCH_BONUS = 0.05
-WASTED_STATUS_PENALTY = 0.02
 SE_THRESHOLD = 2.0
 NO_PROGRESS_EPS = 1e-4
 # --------------------------------------------------------------------------
@@ -233,7 +233,7 @@ class ShowdownEnvironment(BaseShowdownEnv):
 			self._last_battle_tag = curr_tag
 			self._elo_updated_this_battle = False
 
-		# --- compute diffs ONCE (used by fallback and by shaping signals) ---
+		# Compute diffs that we still use for shaping
 		health_team = [mon.current_hp_fraction for mon in battle.team.values()]
 		health_opponent = [mon.current_hp_fraction for mon in battle.opponent_team.values()]
 		if len(health_opponent) < len(health_team):
@@ -270,35 +270,20 @@ class ShowdownEnvironment(BaseShowdownEnv):
 
 		diff_faints_opponent = np.array(prior_faints_opponent) - np.array(faints_opponent)
 		diff_faints_team = np.array(prior_faints_team) - np.array(faints_team)
-		# --------------------------------------------------------------------
 
-		# --- base reward: prefer poke-env helper; fallback to manual diffs ---
-		if hasattr(self, "reward_computing_helper"):
-			base = float(
-				self.reward_computing_helper(
-					battle,
-					fainted_value=KO_WEIGHT,
-					hp_value=1.0,
-					victory_value=WIN_BONUS,
-				)
+		# Base reward: always use poke-env helper with status weighting
+		base = float(
+			self.reward_computing_helper(
+				battle,
+				fainted_value=KO_WEIGHT,
+				hp_value=1.0,
+				victory_value=WIN_BONUS,
+				status_value=STATUS_WEIGHT,
 			)
-		else:
-			base = (
-				np.sum(diff_health_opponent)
-				- np.sum(diff_health_team)
-				+ (-np.sum(diff_faints_opponent)) * KO_WEIGHT
-				- (-np.sum(diff_faints_team)) * KO_WEIGHT
-			)
-			if battle.finished:
-				if battle.won:
-					base += WIN_BONUS
-				elif battle.lost:
-					base -= LOSS_PENALTY
-
+		)
 		reward = float(base)
-		# --------------------------------------------------------------------
 
-		# Detect a voluntary switch (active changed, we didn't faint to force it)
+		# Detect a voluntary switch (active changed, not forced by faint)
 		voluntary_switch = False
 		if (
 			prior_battle is not None
@@ -309,7 +294,7 @@ class ShowdownEnvironment(BaseShowdownEnv):
 				if (np.sum(diff_faints_team) == 0) and (not prior_battle.active_pokemon.fainted):
 					voluntary_switch = True
 
-		# Save for state embedding (next step sees what we just did)
+		# Save for state embedding
 		self._last_voluntary_switch = 1.0 if voluntary_switch else 0.0
 
 		best_attack_bp = 0.0
@@ -356,10 +341,9 @@ class ShowdownEnvironment(BaseShowdownEnv):
 					reward += STAY_BONUS
 			self._turns_since_switch = min(self._turns_since_switch + 1, 10)
 
-		# ---------- Smart attack / switch / status shaping ----------
+		# Smart attack / switch shaping (keep as-is if you like these nudges)
 		best_effectiveness_vs_opponent_prev = self._best_offense_multiplier(prior_battle)
 		opponent_threat_prev = self._threat_from_opp(prior_battle)
-
 		did_damage = bool((diff_health_opponent > NO_PROGRESS_EPS).any())
 
 		if voluntary_switch and opponent_threat_prev >= SE_THRESHOLD:
@@ -371,36 +355,9 @@ class ShowdownEnvironment(BaseShowdownEnv):
 		if (not voluntary_switch) and opponent_threat_prev >= SE_THRESHOLD and not did_damage:
 			reward -= INEFFECTIVE_PENALTY
 
-		opponent_status_now = getattr(
-			getattr(battle, "opponent_active_pokemon", None), "status", None
-		)
-		opponent_status_prev = (
-			getattr(getattr(prior_battle, "opponent_active_pokemon", None), "status", None)
-			if prior_battle is not None
-			else None
-		)
-
-		team_boosts_now = dict(getattr(getattr(battle, "active_pokemon", None), "boosts", {}) or {})
-		team_boosts_prev = (
-			dict(getattr(getattr(prior_battle, "active_pokemon", None), "boosts", {}) or {})
-			if prior_battle is not None
-			else {}
-		)
-
-		boost_gained = any(
-			(team_boosts_now.get(k, 0) > team_boosts_prev.get(k, 0)) for k in team_boosts_now.keys()
-		)
-
-		no_status_change = opponent_status_now == opponent_status_prev
-		no_progress = (not did_damage) and (not boost_gained)
-		if no_status_change and no_progress:
-			reward -= WASTED_STATUS_PENALTY
-		# ---------- end shaping ----------
-
-		# Small per-step nudge to end games sooner
 		reward += STEP_PENALTY
 
-		# Elo: update once per finished battle (no extra win/loss to reward here!)
+		# Elo: update once per finished battle
 		if battle.finished and not self._elo_updated_this_battle:
 			self._elo_update_once(battle)
 			self._elo_updated_this_battle = True
