@@ -227,63 +227,61 @@ class ShowdownEnvironment(BaseShowdownEnv):
 
 		prior_battle = self._get_prior_battle(battle)
 
-		# New battle starting (first step): allow Elo to update at the end
+		# Track battle boundaries for Elo application
 		curr_tag = getattr(battle, "battle_tag", None)
 		if curr_tag != self._last_battle_tag:
 			self._last_battle_tag = curr_tag
 			self._elo_updated_this_battle = False
 
-		# Compute diffs that we still use for shaping
+		# Minimal diffs we still use for shaping (switch detection and damage check)
 		health_team = [mon.current_hp_fraction for mon in battle.team.values()]
 		health_opponent = [mon.current_hp_fraction for mon in battle.opponent_team.values()]
 		if len(health_opponent) < len(health_team):
 			health_opponent.extend([1.0] * (len(health_team) - len(health_opponent)))
 
-		prior_health_opponent = []
-		prior_health_team = []
 		if prior_battle is not None:
 			prior_health_opponent = [
 				mon.current_hp_fraction for mon in prior_battle.opponent_team.values()
 			]
 			prior_health_team = [mon.current_hp_fraction for mon in prior_battle.team.values()]
-		if len(prior_health_opponent) < len(health_team):
-			prior_health_opponent.extend([1.0] * (len(health_team) - len(prior_health_opponent)))
-		if prior_battle is None:
-			prior_health_team = health_team.copy()
+			if len(prior_health_opponent) < len(health_team):
+				prior_health_opponent.extend(
+					[1.0] * (len(health_team) - len(prior_health_opponent))
+				)
+		else:
 			prior_health_opponent = health_opponent.copy()
+			prior_health_team = health_team.copy()
 
 		diff_health_opponent = np.array(prior_health_opponent) - np.array(health_opponent)
 		diff_health_team = np.array(prior_health_team) - np.array(health_team)
 
+		# Faints diffs for switch detection
 		faints_team = [sum(1 for mon in battle.team.values() if mon.fainted)]
 		faints_opponent = [sum(1 for mon in battle.opponent_team.values() if mon.fainted)]
-		prior_faints_opponent = []
-		prior_faints_team = []
 		if prior_battle is not None:
 			prior_faints_opponent = [
 				sum(1 for mon in prior_battle.opponent_team.values() if mon.fainted)
 			]
 			prior_faints_team = [sum(1 for mon in prior_battle.team.values() if mon.fainted)]
-		if prior_battle is None:
+		else:
 			prior_faints_opponent = faints_opponent.copy()
 			prior_faints_team = faints_team.copy()
 
-		diff_faints_opponent = np.array(prior_faints_opponent) - np.array(faints_opponent)
 		diff_faints_team = np.array(prior_faints_team) - np.array(faints_team)
 
-		# Base reward: always use poke-env helper with status weighting
+		# Base reward: rely entirely on poke-env helper (HP, KOs, status, victory)
 		base = float(
 			self.reward_computing_helper(
 				battle,
 				fainted_value=KO_WEIGHT,
-				hp_value=1.0,
+				hp_value=1.0,  # 1.0 ≈ 100% HP swing across one mon; tune down to 0.5 if too spiky
 				victory_value=WIN_BONUS,
 				status_value=STATUS_WEIGHT,
 			)
 		)
 		reward = float(base)
 
-		# Detect a voluntary switch (active changed, not forced by faint)
+		# Detect voluntary switch (not from faint)
 		voluntary_switch = False
 		if (
 			prior_battle is not None
@@ -293,10 +291,9 @@ class ShowdownEnvironment(BaseShowdownEnv):
 			if prior_battle.active_pokemon.species != battle.active_pokemon.species:
 				if (np.sum(diff_faints_team) == 0) and (not prior_battle.active_pokemon.fainted):
 					voluntary_switch = True
-
-		# Save for state embedding
 		self._last_voluntary_switch = 1.0 if voluntary_switch else 0.0
 
+		# Attack strength check
 		best_attack_bp = 0.0
 		if getattr(battle, "available_moves", None):
 			for m in battle.available_moves:
@@ -305,7 +302,7 @@ class ShowdownEnvironment(BaseShowdownEnv):
 					best_attack_bp = bp
 		had_decent_attack = best_attack_bp >= _DECENT_BP
 
-		# Penalise switch spam and hazard entries
+		# Gentle anti-switch-spam + hazard cost
 		if voluntary_switch:
 			pen = SWITCH_PENALTY
 			if had_decent_attack:
@@ -316,19 +313,15 @@ class ShowdownEnvironment(BaseShowdownEnv):
 			sc = battle.side_conditions  # our side
 			if SideCondition.STEALTH_ROCK in sc:
 				pen += HAZARD_SWITCH_PENALTY
-			spikes_layers = sc.get(SideCondition.SPIKES, 0)
-			if spikes_layers:
-				pen += 0.01 * float(spikes_layers)
-			tox_layers = sc.get(SideCondition.TOXIC_SPIKES, 0)
-			if tox_layers:
-				pen += 0.01 * float(tox_layers)
+			pen += 0.005 * float(sc.get(SideCondition.SPIKES, 0))
+			pen += 0.005 * float(sc.get(SideCondition.TOXIC_SPIKES, 0))
 			if SideCondition.STICKY_WEB in sc:
-				pen += 0.005
+				pen += 0.003
 
 			reward -= pen
 			self._turns_since_switch = 0
 		else:
-			# tiny nudge for staying in when not forced
+			# tiny bonus for not churning switches
 			if (
 				prior_battle is not None
 				and prior_battle.active_pokemon is not None
@@ -341,7 +334,7 @@ class ShowdownEnvironment(BaseShowdownEnv):
 					reward += STAY_BONUS
 			self._turns_since_switch = min(self._turns_since_switch + 1, 10)
 
-		# Smart attack / switch shaping (keep as-is if you like these nudges)
+		# Small nudges for tactical quality
 		best_effectiveness_vs_opponent_prev = self._best_offense_multiplier(prior_battle)
 		opponent_threat_prev = self._threat_from_opp(prior_battle)
 		did_damage = bool((diff_health_opponent > NO_PROGRESS_EPS).any())
@@ -355,9 +348,10 @@ class ShowdownEnvironment(BaseShowdownEnv):
 		if (not voluntary_switch) and opponent_threat_prev >= SE_THRESHOLD and not did_damage:
 			reward -= INEFFECTIVE_PENALTY
 
-		reward += STEP_PENALTY
+		# No per-step penalty by default (prevents negative drift)
+		# reward += STEP_PENALTY
 
-		# Elo: update once per finished battle
+		# Elo update (not part of reward)
 		if battle.finished and not self._elo_updated_this_battle:
 			self._elo_update_once(battle)
 			self._elo_updated_this_battle = True
