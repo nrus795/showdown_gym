@@ -25,8 +25,8 @@ BOOSTS = ("atk", "def", "spa", "spd", "spe")
 # Main reward weights
 KO_WEIGHT = 3.0
 STATUS_WEIGHT = 0.5
-WIN_BONUS = 25.0
-LOSS_PENALTY = 25.0
+WIN_BONUS = 5.0
+LOSS_PENALTY = 5.0
 REWARD_CLIP = 50.0
 
 # Dense HP shaping (we take helper hp_value=0 and do it ourselves)
