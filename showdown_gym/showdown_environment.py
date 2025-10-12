@@ -421,7 +421,7 @@ class ShowdownEnvironment(BaseShowdownEnv):
 			self.reward_computing_helper(
 				battle,
 				fainted_value=KO_WEIGHT,
-				hp_value=0.0,  # we do HP shaping below
+				hp_value=HP_WEIGHT,  # we do HP shaping below
 				victory_value=WIN_BONUS,
 				status_value=STATUS_WEIGHT,
 			)
@@ -429,9 +429,9 @@ class ShowdownEnvironment(BaseShowdownEnv):
 		reward = float(base)
 
 		# Dense HP shaping (progress signal every turn)
-		opp_hp_loss = float(np.sum(diff_health_opponent))
-		own_hp_loss = float(np.sum(diff_health_team))
-		reward += HP_WEIGHT * (opp_hp_loss - own_hp_loss)
+		# opp_hp_loss = float(np.sum(diff_health_opponent))
+		# own_hp_loss = float(np.sum(diff_health_team))
+		# reward += HP_WEIGHT * (opp_hp_loss - own_hp_loss)
 
 		# Detect voluntary switch (not from faint)
 		voluntary_switch = False
