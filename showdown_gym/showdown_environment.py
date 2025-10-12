@@ -58,6 +58,9 @@ NO_PROGRESS_PENALTY = 0.2
 # Hazard progress
 HAZARD_BONUS = 0.1  # per effective new hazard "unit" applied to opponent
 
+IMMUNE_MOVE_PENALTY = 0.5
+WHIFF_PENALTY = 0.12
+
 # --- Simple Elo tracking (internal, not PS ladder) ---
 ELO_K = 32.0
 ELO_AGENT_INIT = 1000.0
@@ -93,6 +96,25 @@ class ShowdownEnvironment(BaseShowdownEnv):
 		# Learning aids
 		self._turns_since_progress = 0
 		self._illegal_action_count = 0
+		self._last_action_kind = "other"  # "move" or "switch" or "other"
+		self._last_move_idx = None
+
+	def _record_action_choice(self, chosen_id: int) -> None:
+		# Normalize all move variants to a 0..3 index
+		if 6 <= chosen_id <= 9:
+			self._last_move_idx, self._last_action_kind = chosen_id - 6, "move"
+		elif 10 <= chosen_id <= 13:
+			self._last_move_idx, self._last_action_kind = chosen_id - 10, "move"  # mega
+		elif 14 <= chosen_id <= 17:
+			self._last_move_idx, self._last_action_kind = chosen_id - 14, "move"  # z-move
+		elif 18 <= chosen_id <= 21:
+			self._last_move_idx, self._last_action_kind = chosen_id - 18, "move"  # dynamax
+		elif 22 <= chosen_id <= 25:
+			self._last_move_idx, self._last_action_kind = chosen_id - 22, "move"  # tera
+		elif 0 <= chosen_id <= 5:
+			self._last_move_idx, self._last_action_kind = None, "switch"
+		else:
+			self._last_move_idx, self._last_action_kind = None, "other"
 
 	def _to_id(self, x) -> str:
 		s = getattr(x, "name", x)
@@ -294,8 +316,12 @@ class ShowdownEnvironment(BaseShowdownEnv):
 		legal = self._legal_action_ids(b)
 		a = int(action)
 
+		def _finish(chosen: int) -> np.int64:
+			self._record_action_choice(chosen)
+			return np.int64(chosen)
+
 		if a in legal:
-			return np.int64(a)
+			return _finish(a)
 
 		# Illegal -> smart fallback
 		self._illegal_action_count += 1
@@ -305,17 +331,17 @@ class ShowdownEnvironment(BaseShowdownEnv):
 		if m_idx is not None:
 			base_move_id = 6 + m_idx
 			if base_move_id in legal:
-				return np.int64(base_move_id)
+				return _finish(base_move_id)
 
 		# Otherwise safest switch
 		s_idx = self._best_switch_index(b)
 		if s_idx is not None:
-			switch_id = s_idx  # 0..5
+			switch_id = s_idx
 			if switch_id in legal:
-				return np.int64(switch_id)
+				return _finish(switch_id)
 
 		# Last resort default
-		return np.int64(-2)
+		return _finish(-2)
 
 	def get_additional_info(self) -> dict[str, dict[str, Any]]:
 		info = super().get_additional_info()
@@ -511,6 +537,34 @@ class ShowdownEnvironment(BaseShowdownEnv):
 		if (not voluntary_switch) and opponent_threat_prev >= SE_THRESHOLD and not did_damage:
 			reward -= INEFFECTIVE_PENALTY
 
+		if voluntary_switch and self._best_offense_multiplier(prior_battle) == 0.0:
+			reward += 0.15
+
+		if self._last_action_kind == "move" and not did_damage:
+			# Try to read the exact move we attempted on the prior state
+			move_multiplier = None
+			if prior_battle is not None and getattr(prior_battle, "available_moves", None):
+				if self._last_move_idx is not None and self._last_move_idx < len(
+					prior_battle.available_moves
+				):
+					mv = prior_battle.available_moves[self._last_move_idx]
+					opp_types_prev = self._types_of(
+						getattr(prior_battle, "opponent_active_pokemon", None)
+					)
+					try:
+						move_multiplier = self._type_multiplier(
+							getattr(mv, "type", None), opp_types_prev
+						)
+					except Exception:
+						move_multiplier = None
+
+			# If we can tell it was a type-immune matchup, penalize more
+			if move_multiplier == 0.0:
+				reward -= IMMUNE_MOVE_PENALTY
+			else:
+				# Zero damage for other reasons: Protect, miss, ability immunity
+				# like Volt Absorb, status move that failed, etc.
+				reward -= WHIFF_PENALTY
 		# Anti-stall if we made no progress (no damage, no faints on either side)
 		made_progress = did_damage or bool((diff_health_team > NO_PROGRESS_EPS).any())
 		made_progress = made_progress or (
