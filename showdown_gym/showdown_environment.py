@@ -30,7 +30,7 @@ LOSS_PENALTY = 5.0
 REWARD_CLIP = 50.0
 
 # Dense HP shaping (we take helper hp_value=0 and do it ourselves)
-HP_WEIGHT = 1.0  # reward += HP_WEIGHT * (opp_hp_loss - own_hp_loss)
+HP_WEIGHT = 2.0  # reward += HP_WEIGHT * (opp_hp_loss - own_hp_loss)
 
 # Switch shaping
 SWITCH_PENALTY = 0.02
