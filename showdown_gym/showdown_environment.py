@@ -531,7 +531,8 @@ class ShowdownEnvironment(BaseShowdownEnv):
 			self._elo_update_once(battle)
 			self._elo_updated_this_battle = True
 
-		reward = float(np.clip(reward, -REWARD_CLIP, REWARD_CLIP))
+		# reward = float(np.clip(reward, -REWARD_CLIP, REWARD_CLIP))
+		reward = float(np.clip(reward, 0, REWARD_CLIP))
 		return reward
 
 	def _observation_size(self) -> int:
