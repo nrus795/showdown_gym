@@ -23,40 +23,40 @@ STATUSES = ("BRN", "PAR", "PSN", "SLP", "FRZ")
 BOOSTS = ("atk", "def", "spa", "spd", "spe")
 
 # Main reward weights
-KO_WEIGHT = 7.0
-STATUS_WEIGHT = 1.5
-WIN_BONUS = 30.0
-LOSS_PENALTY = 30.0
-REWARD_CLIP = 50.0
+KO_WEIGHT = 0.7
+STATUS_WEIGHT = 0.15
+WIN_BONUS = 5.0
+LOSS_PENALTY = 5.0
+REWARD_CLIP = 10.0
 
 # Dense HP shaping (we take helper hp_value=0 and do it ourselves)
-HP_WEIGHT = 4.0  # reward += HP_WEIGHT * (opp_hp_loss - own_hp_loss)
+HP_WEIGHT = 0.1  # reward += HP_WEIGHT * (opp_hp_loss - own_hp_loss)
 
 # Switch shaping
-SWITCH_PENALTY = 0.002
-HAZARD_SWITCH_PENALTY = 0.002
-STAY_BONUS = 0.05
+SWITCH_PENALTY = 0.05
+HAZARD_SWITCH_PENALTY = 0.05
+STAY_BONUS = 0.02
 
 # Attack quality shaping
 _DECENT_BP = 70
 _MAX_BP_NORM = 150.0
 
 # Tactical nudges
-TYPE_HIT_BONUS = 1.5
-INEFFECTIVE_PENALTY = 1.5
-THREAT_SWITCH_BONUS = 4.0
+TYPE_HIT_BONUS = 0.5
+INEFFECTIVE_PENALTY = 0.5
+THREAT_SWITCH_BONUS = 1.0
 SE_THRESHOLD = 2.0
 NO_PROGRESS_EPS = 1e-4
 
 # Anti-stall (soft)
 NO_PROGRESS_TURNS = 3
-NO_PROGRESS_PENALTY = 1.0
+NO_PROGRESS_PENALTY = 0.3
 
 # Hazard progress
-HAZARD_BONUS = 2.0  # per effective new hazard "unit" applied to opponent
+HAZARD_BONUS = 0.5
 
-IMMUNE_MOVE_PENALTY = 1.5
-WHIFF_PENALTY = 1.2
+IMMUNE_MOVE_PENALTY = 0.5
+WHIFF_PENALTY = 0.4
 
 # --- Simple Elo tracking (internal, not PS ladder) ---
 ELO_K = 32.0
@@ -447,7 +447,7 @@ class ShowdownEnvironment(BaseShowdownEnv):
 			self.reward_computing_helper(
 				battle,
 				fainted_value=KO_WEIGHT,
-				hp_value=HP_WEIGHT,  # we do HP shaping below
+				hp_value=0.0,
 				victory_value=WIN_BONUS,
 				status_value=STATUS_WEIGHT,
 			)
@@ -580,7 +580,7 @@ class ShowdownEnvironment(BaseShowdownEnv):
 			self._elo_update_once(battle)
 			self._elo_updated_this_battle = True
 
-		# reward = float(np.clip(reward, -REWARD_CLIP, REWARD_CLIP))
+		reward = float(np.clip(reward, -REWARD_CLIP, REWARD_CLIP))
 		# reward = float(np.clip(reward, 0, REWARD_CLIP))
 		return reward
 
@@ -598,8 +598,7 @@ class ShowdownEnvironment(BaseShowdownEnv):
 			int: The size of the observation space.
 		"""
 
-		# 47 original + 2 tactical scalars (best offense multiplier, opp threat) = 49
-		return 49
+		return 57
 
 	def embed_battle(self, battle: AbstractBattle) -> np.ndarray:
 		"""
@@ -680,9 +679,30 @@ class ShowdownEnvironment(BaseShowdownEnv):
 		turns_since_switch_norm = float(min(getattr(self, "_turns_since_switch", 10), 10)) / 10.0
 		best_bp_norm = float(min(best_attack_bp, _MAX_BP_NORM)) / _MAX_BP_NORM
 
-		# NEW: tactical scalars
+		# Tactical scalars
 		best_effectiveness_vs_opponent_curr = self._best_offense_multiplier(battle)
 		opponent_threat_curr = self._threat_from_opp(battle)
+
+		# --- NEW: Move Features (4 moves * 2 features = 8 total) ---
+		move_features = np.zeros(8, dtype=np.float32)
+
+		active_mon = getattr(battle, "active_pokemon", None)
+		opp_types = self._types_of(getattr(battle, "opponent_active_pokemon", None))
+
+		if active_mon is not None:
+			moves = list(active_mon.moves.values())
+			for i, mv in enumerate(moves[:4]):
+				# Feature 1: Normalized Base Power (0.0 to 1.0)
+				bp = float(getattr(mv, "base_power", 0) or 0)
+				move_features[i * 2] = min(bp, _MAX_BP_NORM) / _MAX_BP_NORM
+
+				# Feature 2: Type Effectiveness Multiplier (Normalized)
+				# Normalizes raw multiplier (0.0, 0.5, 1.0, 2.0, 4.0) to [0.0, 1.0]
+				raw_multiplier = self._type_multiplier(getattr(mv, "type", None), opp_types)
+				# Use max(raw_multiplier, 0.0) to handle edge cases if any
+				move_features[i * 2 + 1] = max(raw_multiplier, 0.0) / 4.0
+
+		# -----------------------------------------------------------
 
 		final_vector = np.concatenate(
 			[
@@ -702,7 +722,9 @@ class ShowdownEnvironment(BaseShowdownEnv):
 				np.array([turns_since_switch_norm, best_bp_norm], dtype=np.float32),  # 2
 				np.array(
 					[best_effectiveness_vs_opponent_curr, opponent_threat_curr], dtype=np.float32
-				),  # 2 (new)
+				),  # 2
+				# --- The new 8 features are appended here ---
+				move_features,  # 8
 			]
 		)
 
