@@ -358,6 +358,8 @@ class ShowdownEnvironment(BaseShowdownEnv):
 			info[agent]["elo_agent"] = round(self._elo_agent_rating, 1)
 			info[agent]["elo_opponent"] = round(self._elo_opponent_rating, 1)
 			info[agent]["illegal_actions"] = int(self._illegal_action_count)
+			if self.agent1.n_won_battles + self.agent1.n_lost_battles > 0:
+				info[agent]["win_rate"] = self.agent1.win_rate
 			# info[agent]["win_rate"] = self.agent1.win_rate
 
 		# (belt-and-suspenders) ensure Elo is applied if logger reads after finish
