@@ -23,43 +23,40 @@ STATUSES = ("BRN", "PAR", "PSN", "SLP", "FRZ")
 BOOSTS = ("atk", "def", "spa", "spd", "spe")
 
 # Main reward weights
-KO_WEIGHT = 3.0
+KO_WEIGHT = 7.0
 STATUS_WEIGHT = 1.5
-WIN_BONUS = 5.0
-LOSS_PENALTY = 5.0
+WIN_BONUS = 30.0
+LOSS_PENALTY = 30.0
 REWARD_CLIP = 50.0
 
 # Dense HP shaping (we take helper hp_value=0 and do it ourselves)
-HP_WEIGHT = 2.0  # reward += HP_WEIGHT * (opp_hp_loss - own_hp_loss)
+HP_WEIGHT = 4.0  # reward += HP_WEIGHT * (opp_hp_loss - own_hp_loss)
 
 # Switch shaping
 SWITCH_PENALTY = 0.002
 HAZARD_SWITCH_PENALTY = 0.002
 STAY_BONUS = 0.05
-_RECENT_SWITCH_EXTRA = 0.05
-_ATTACK_READY_EXTRA = 0.04
-_SWITCH_COOLDOWN_TURNS = 2
 
 # Attack quality shaping
 _DECENT_BP = 70
 _MAX_BP_NORM = 150.0
 
 # Tactical nudges
-TYPE_HIT_BONUS = 0.3
-INEFFECTIVE_PENALTY = 0.2
-THREAT_SWITCH_BONUS = 0.5
+TYPE_HIT_BONUS = 1.5
+INEFFECTIVE_PENALTY = 1.5
+THREAT_SWITCH_BONUS = 4.0
 SE_THRESHOLD = 2.0
 NO_PROGRESS_EPS = 1e-4
 
 # Anti-stall (soft)
 NO_PROGRESS_TURNS = 3
-NO_PROGRESS_PENALTY = 0.2
+NO_PROGRESS_PENALTY = 1.0
 
 # Hazard progress
-HAZARD_BONUS = 0.1  # per effective new hazard "unit" applied to opponent
+HAZARD_BONUS = 2.0  # per effective new hazard "unit" applied to opponent
 
-IMMUNE_MOVE_PENALTY = 0.5
-WHIFF_PENALTY = 0.12
+IMMUNE_MOVE_PENALTY = 1.5
+WHIFF_PENALTY = 1.2
 
 # --- Simple Elo tracking (internal, not PS ladder) ---
 ELO_K = 32.0
@@ -354,6 +351,9 @@ class ShowdownEnvironment(BaseShowdownEnv):
 			agent = self.possible_agents[0]
 			info[agent]["win"] = self.battle1.won
 			info[agent]["turns"] = self.battle1.turn
+
+			legal_ids = self._legal_action_ids(self.battle1)
+			info[agent]["legal_actions"] = sorted(list(legal_ids))
 			# expose internal Elo for logging
 			info[agent]["elo_agent"] = round(self._elo_agent_rating, 1)
 			info[agent]["elo_opponent"] = round(self._elo_opponent_rating, 1)
@@ -455,9 +455,9 @@ class ShowdownEnvironment(BaseShowdownEnv):
 		reward = float(base)
 
 		# Dense HP shaping (progress signal every turn)
-		# opp_hp_loss = float(np.sum(diff_health_opponent))
-		# own_hp_loss = float(np.sum(diff_health_team))
-		# reward += HP_WEIGHT * (opp_hp_loss - own_hp_loss)
+		opp_hp_loss = float(np.sum(diff_health_opponent))
+		own_hp_loss = float(np.sum(diff_health_team))
+		reward += HP_WEIGHT * (opp_hp_loss - own_hp_loss)
 
 		# Detect voluntary switch (not from faint)
 		voluntary_switch = False
@@ -478,15 +478,10 @@ class ShowdownEnvironment(BaseShowdownEnv):
 				bp = float(getattr(m, "base_power", 0) or 0)
 				if bp > best_attack_bp:
 					best_attack_bp = bp
-		had_decent_attack = best_attack_bp >= _DECENT_BP
 
 		# Gentle anti-switch-spam + hazard cost
 		if voluntary_switch:
 			pen = SWITCH_PENALTY
-			if had_decent_attack:
-				pen += _ATTACK_READY_EXTRA
-			if self._turns_since_switch <= _SWITCH_COOLDOWN_TURNS:
-				pen += _RECENT_SWITCH_EXTRA
 
 			sc = battle.side_conditions  # our side
 			if SideCondition.STEALTH_ROCK in sc:
@@ -585,7 +580,7 @@ class ShowdownEnvironment(BaseShowdownEnv):
 			self._elo_update_once(battle)
 			self._elo_updated_this_battle = True
 
-		reward = float(np.clip(reward, -REWARD_CLIP, REWARD_CLIP))
+		# reward = float(np.clip(reward, -REWARD_CLIP, REWARD_CLIP))
 		# reward = float(np.clip(reward, 0, REWARD_CLIP))
 		return reward
 
