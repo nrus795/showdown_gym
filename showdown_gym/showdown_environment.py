@@ -23,14 +23,14 @@ STATUSES = ("BRN", "PAR", "PSN", "SLP", "FRZ")
 BOOSTS = ("atk", "def", "spa", "spd", "spe")
 
 # Main reward weights
-KO_WEIGHT = 0.7
+KO_WEIGHT = 1.5
 STATUS_WEIGHT = 0.15
-WIN_BONUS = 5.0
-LOSS_PENALTY = 5.0
+WIN_BONUS = 3.0
+LOSS_PENALTY = 3.0
 REWARD_CLIP = 10.0
 
 # Dense HP shaping (we take helper hp_value=0 and do it ourselves)
-HP_WEIGHT = 0.1  # reward += HP_WEIGHT * (opp_hp_loss - own_hp_loss)
+HP_WEIGHT = 1.0  # reward += HP_WEIGHT * (opp_hp_loss - own_hp_loss)
 
 # Switch shaping
 SWITCH_PENALTY = 0.05
@@ -352,8 +352,8 @@ class ShowdownEnvironment(BaseShowdownEnv):
 			info[agent]["win"] = self.battle1.won
 			info[agent]["turns"] = self.battle1.turn
 
-			legal_ids = self._legal_action_ids(self.battle1)
-			info[agent]["legal_actions"] = sorted(list(legal_ids))
+			# legal_ids = self._legal_action_ids(self.battle1)
+			# info[agent]["legal_actions"] = sorted(list(legal_ids))
 			# expose internal Elo for logging
 			info[agent]["elo_agent"] = round(self._elo_agent_rating, 1)
 			info[agent]["elo_opponent"] = round(self._elo_opponent_rating, 1)
